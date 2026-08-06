@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import sys
+import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from urllib.error import HTTPError, URLError
@@ -181,6 +182,32 @@ def shell(adb: str, serial: str, command: str, timeout: float = 8) -> str:
     return result.stdout.strip() if result.returncode == 0 else ""
 
 
+def default_home(adb: str, serial: str) -> str:
+    output = shell(
+        adb,
+        serial,
+        "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME",
+    )
+    components = [line.strip() for line in output.splitlines() if "/" in line and "=" not in line]
+    return components[-1] if components else ""
+
+
+def recover_application(adb: str, serial: str, restore_home: bool) -> None:
+    if restore_home:
+        result = run([adb, "-s", serial, "shell", "cmd", "package", "set-home-activity", f"{PACKAGE}/.MainActivity"], 8)
+        if result.returncode != 0 or "Success" not in result.stdout:
+            raise RuntimeError("APK installed, but HA Companion could not be restored as the Home app")
+    started = run([adb, "-s", serial, "shell", "am", "start", "-n", f"{PACKAGE}/.MainActivity"], 10)
+    if started.returncode != 0:
+        raise RuntimeError("APK installed, but HA Companion could not be launched")
+    for _ in range(5):
+        process = shell(adb, serial, f"pidof {PACKAGE}", 4)
+        if process:
+            return
+        time.sleep(1)
+    raise RuntimeError("APK installed, but the HA Companion process did not start")
+
+
 def inspect(adb: str, address: str, port: int) -> Panel:
     serial = f"{address}:{port}"
     try:
@@ -275,6 +302,7 @@ def install(args: argparse.Namespace) -> int:
     if metadata and panel.app_version_code is not None and metadata["version_code"] <= panel.app_version_code and not args.reinstall:
         print(f"No update needed: {panel.address} has version code {panel.app_version_code}; release is {metadata['version_code']}.")
         return 0
+    was_home = default_home(adb, panel.address).startswith(f"{PACKAGE}/")
     action = "Update" if panel.app_version else "Install"
     if not args.yes:
         answer = input(f"{action} {apk.name} on {panel.address} ({panel.model or 'unknown model'})? [y/N] ")
@@ -288,8 +316,10 @@ def install(args: argparse.Namespace) -> int:
     result = run(command, args.install_timeout)
     if result.returncode != 0 or "Success" not in result.stdout:
         raise RuntimeError((result.stdout + result.stderr).strip() or "ADB installation failed")
+    recover_application(adb, panel.address, was_home or args.set_home)
     updated = inspect(adb, address, port)
-    print(f"Success: {updated.address} now has {PACKAGE} {updated.app_version or '(version unavailable)'}." )
+    home = " · Home restored" if was_home or args.set_home else ""
+    print(f"Success: {updated.address} now has {PACKAGE} {updated.app_version or '(version unavailable)'}{home}." )
     return 0
 
 
@@ -319,6 +349,7 @@ def parser() -> argparse.ArgumentParser:
     installation.add_argument("--yes", action="store_true")
     installation.add_argument("--allow-unknown", action="store_true")
     installation.add_argument("--reinstall", action="store_true", help="install even when the selected version is not newer")
+    installation.add_argument("--set-home", action="store_true", help="make HA Companion the default Home app after installation")
     return root
 
 

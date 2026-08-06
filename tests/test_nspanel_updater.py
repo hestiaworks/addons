@@ -32,6 +32,14 @@ class UpdaterTest(unittest.TestCase):
         self.assertEqual("unknown-android", panel.classification)
         self.assertIsNone(panel.app_version)
 
+    def test_extracts_default_home_component(self):
+        output = "priority=0 preferredOrder=0\ndev.hacompanion.panel/.MainActivity"
+        with patch.object(updater, "shell", return_value=output):
+            self.assertEqual(
+                "dev.hacompanion.panel/.MainActivity",
+                updater.default_home("adb", "192.0.2.6:5555"),
+            )
+
     def test_resolves_stable_and_prerelease_channels(self):
         releases = [
             {"tag_name": "v2.0.0-beta.1", "draft": False, "prerelease": True},
