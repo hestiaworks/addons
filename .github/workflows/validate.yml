@@ -1,0 +1,23 @@
+name: Validate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Test updater and validate add-on sources
+        run: |
+          python3 -m unittest discover -s tests -p 'test_*.py'
+          python3 -m py_compile tools/nspanel-updater.py nspanel_updater/nspanel_updater.py nspanel_updater/server.py
+          bash -n nspanel_updater/run.sh
