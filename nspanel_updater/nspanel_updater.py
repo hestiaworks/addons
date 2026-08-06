@@ -177,7 +177,26 @@ def default_home(serial: str) -> str:
     return next((line for line in reversed(output.splitlines()) if "/" in line and "=" not in line), "")
 
 
-def update(address: str, repository: str, channel: str, local_release: str | None, migrate_debug: bool) -> str:
+def set_and_verify_home(serial: str) -> None:
+    component = f"{PACKAGE}/.MainActivity"
+    last_output = ""
+    for _ in range(4):
+        result = run(["adb", "-s", serial, "shell", "cmd", "package", "set-home-activity", component])
+        last_output = (result.stdout + result.stderr).strip()
+        if result.returncode == 0 and default_home(serial).startswith(f"{PACKAGE}/"):
+            return
+        time.sleep(1)
+    raise RuntimeError(f"App installed but Android did not retain it as Home: {last_output or 'unknown error'}")
+
+
+def update(
+    address: str,
+    repository: str,
+    channel: str,
+    local_release: str | None,
+    migrate_debug: bool,
+    set_home: bool,
+) -> str:
     panel = inspect(address)
     if panel["adb_state"] != "device" or panel["classification"] not in {"nspanel-companion", "probable-nspanel"}:
         raise RuntimeError("ADB target is not a verified NSPanel")
@@ -200,10 +219,8 @@ def update(address: str, repository: str, channel: str, local_release: str | Non
         result = run(["adb", "-s", serial, "install", str(apk)], 240)
     if result.returncode or "Success" not in result.stdout:
         raise RuntimeError((result.stdout + result.stderr).strip() or "ADB installation failed")
-    if restore_home or not panel.get("app_version"):
-        home = run(["adb", "-s", serial, "shell", "cmd", "package", "set-home-activity", f"{PACKAGE}/.MainActivity"])
-        if home.returncode:
-            raise RuntimeError("App installed but could not be restored as Home")
+    if set_home or restore_home or not panel.get("app_version"):
+        set_and_verify_home(serial)
     start = run(["adb", "-s", serial, "shell", "am", "start", "-n", f"{PACKAGE}/.MainActivity"])
     if start.returncode:
         raise RuntimeError("App installed but could not be started")
@@ -239,7 +256,14 @@ def main() -> int:
         else:
             if not args.github and not args.local_release:
                 raise ValueError("Select --github or --local-release")
-            print(update(args.address, args.repository, args.channel, args.local_release, args.migrate_debug))
+            print(update(
+                args.address,
+                args.repository,
+                args.channel,
+                args.local_release,
+                args.migrate_debug,
+                args.set_home,
+            ))
         return 0
     except Exception as error:
         print(f"Error: {error}", file=__import__("sys").stderr)
