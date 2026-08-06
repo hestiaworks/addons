@@ -142,16 +142,46 @@ def release_apk(repository: str, channel: str) -> tuple[Path, dict]:
     return destination, metadata
 
 
+def verify_local_release(directory: str) -> tuple[Path, dict]:
+    root = Path(directory).resolve()
+    metadata_path = root / "release.json"
+    if not metadata_path.is_file():
+        raise RuntimeError("Local release metadata is missing")
+    metadata = json.loads(metadata_path.read_text())
+    if not isinstance(metadata, dict):
+        raise RuntimeError("Local release metadata is invalid")
+    if metadata.get("application_id") != PACKAGE or metadata.get("abi") != "arm64-v8a":
+        raise RuntimeError("Local release is not for NSPanel Companion ARM64")
+    if metadata.get("certificate_sha256") != PINNED_CERTIFICATE_SHA256:
+        raise RuntimeError("Local release metadata has the wrong signing certificate")
+    apk_name = str(metadata.get("apk") or "")
+    if not re.fullmatch(r"nspanel-companion-[A-Za-z0-9._-]+-arm64\.apk", apk_name):
+        raise RuntimeError("Local release APK name is invalid")
+    apk = (root / apk_name).resolve()
+    if apk.parent != root or not apk.is_file():
+        raise RuntimeError("Local release APK is missing")
+    digest = hashlib.sha256(apk.read_bytes()).hexdigest()
+    if digest != metadata.get("sha256"):
+        raise RuntimeError("Local release APK checksum does not match metadata")
+    keytool = shutil.which("keytool")
+    certificate = run([keytool, "-printcert", "-jarfile", str(apk)], 30) if keytool else None
+    match = re.search(r"SHA256:\s*([0-9A-F:]{95})", certificate.stdout, re.IGNORECASE) if certificate and certificate.returncode == 0 else None
+    fingerprint = match.group(1).replace(":", "").lower() if match else ""
+    if fingerprint != PINNED_CERTIFICATE_SHA256:
+        raise RuntimeError("Local release APK has the wrong signing certificate")
+    return apk, metadata
+
+
 def default_home(serial: str) -> str:
     output = shell(serial, "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME")
     return next((line for line in reversed(output.splitlines()) if "/" in line and "=" not in line), "")
 
 
-def update(address: str, repository: str, channel: str) -> str:
+def update(address: str, repository: str, channel: str, local_release: str | None, migrate_debug: bool) -> str:
     panel = inspect(address)
     if panel["adb_state"] != "device" or panel["classification"] not in {"nspanel-companion", "probable-nspanel"}:
         raise RuntimeError("ADB target is not a verified NSPanel")
-    apk, metadata = release_apk(repository, channel)
+    apk, metadata = verify_local_release(local_release) if local_release else release_apk(repository, channel)
     current = panel.get("app_version_code")
     if current is not None and int(metadata["version_code"]) <= current:
         return f"No update needed; {panel['address']} already has version code {current}."
@@ -161,6 +191,13 @@ def update(address: str, repository: str, channel: str) -> str:
     if panel.get("app_version"):
         command.append("-r")
     result = run([*command, str(apk)], 240)
+    output = (result.stdout + result.stderr).strip()
+    signature_mismatch = "INSTALL_FAILED_UPDATE_INCOMPATIBLE" in output
+    if signature_mismatch and migrate_debug and panel.get("app_version"):
+        uninstall = run(["adb", "-s", serial, "uninstall", PACKAGE], 60)
+        if uninstall.returncode or "Success" not in uninstall.stdout:
+            raise RuntimeError("Debug-to-release migration could not uninstall the existing app")
+        result = run(["adb", "-s", serial, "install", str(apk)], 240)
     if result.returncode or "Success" not in result.stdout:
         raise RuntimeError((result.stdout + result.stderr).strip() or "ADB installation failed")
     if restore_home or not panel.get("app_version"):
@@ -176,7 +213,8 @@ def update(address: str, repository: str, channel: str) -> str:
         time.sleep(1)
     else:
         raise RuntimeError("App installed but did not remain running")
-    return f"Updated {serial} to {metadata['version']}; Home app restored."
+    migration = " Debug installation was removed." if signature_mismatch and migrate_debug else ""
+    return f"Updated {serial} to {metadata['version']}; Home app restored.{migration}"
 
 
 def main() -> int:
@@ -188,16 +226,20 @@ def main() -> int:
     install = commands.add_parser("update")
     install.add_argument("address")
     install.add_argument("--github", action="store_true")
-    install.add_argument("--repository", required=True)
-    install.add_argument("--channel", choices=["stable", "prerelease"], required=True)
+    install.add_argument("--local-release")
+    install.add_argument("--repository", default="dmitrogajduk/ha-companion")
+    install.add_argument("--channel", choices=["stable", "prerelease"], default="stable")
     install.add_argument("--yes", action="store_true")
     install.add_argument("--set-home", action="store_true")
+    install.add_argument("--migrate-debug", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "discover":
             print(json.dumps(discover(args.subnet)))
         else:
-            print(update(args.address, args.repository, args.channel))
+            if not args.github and not args.local_release:
+                raise ValueError("Select --github or --local-release")
+            print(update(args.address, args.repository, args.channel, args.local_release, args.migrate_debug))
         return 0
     except Exception as error:
         print(f"Error: {error}", file=__import__("sys").stderr)

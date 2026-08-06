@@ -76,7 +76,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             self.send_json(HTTPStatus.OK, {
                 "id": STATE["id"], "name": STATE["name"],
-                "paired": bool(STATE["token"]), "version": "0.2.0",
+                "paired": bool(STATE["token"]), "version": "0.3.0",
             })
             return
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -111,13 +111,23 @@ class Handler(BaseHTTPRequestHandler):
                 classification = str(body.get("classification", ""))
                 if classification not in {"nspanel-companion", "probable-nspanel"}:
                     raise ValueError("Refusing to modify an unverified Android device")
-                repository = str(OPTIONS.get("repository") or "dmitrogajduk/ha-companion")
-                channel = str(OPTIONS.get("channel") or "stable")
+                source = str(body.get("source") or "github")
                 with LOCK:
-                    code, stdout, stderr = run_tool([
-                        "update", address, "--github", "--repository", repository,
-                        "--channel", channel, "--yes", "--set-home",
-                    ], 300)
+                    if source == "local":
+                        release_directory = str(OPTIONS.get("local_release_directory") or "")
+                        arguments = ["update", address, "--local-release", release_directory, "--yes", "--set-home"]
+                        if body.get("migrate_debug"):
+                            arguments.append("--migrate-debug")
+                    elif source == "github":
+                        repository = str(OPTIONS.get("repository") or "dmitrogajduk/ha-companion")
+                        channel = str(OPTIONS.get("channel") or "stable")
+                        arguments = [
+                            "update", address, "--github", "--repository", repository,
+                            "--channel", channel, "--yes", "--set-home",
+                        ]
+                    else:
+                        raise ValueError("Unknown release source")
+                    code, stdout, stderr = run_tool(arguments, 300)
                 if code:
                     raise RuntimeError(stderr or stdout or "Update failed")
                 self.send_json(HTTPStatus.OK, {"ok": True, "message": stdout})
