@@ -76,7 +76,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             self.send_json(HTTPStatus.OK, {
                 "id": STATE["id"], "name": STATE["name"],
-                "paired": bool(STATE["token"]), "version": "0.1.1",
+                "paired": bool(STATE["token"]), "version": "0.2.0",
             })
             return
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})

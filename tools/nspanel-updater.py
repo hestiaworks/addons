@@ -26,6 +26,7 @@ DEFAULT_REPOSITORY = "dmitrogajduk/ha-companion"
 DEFAULT_CACHE = Path.home() / ".cache" / "nspanel-companion"
 MAX_METADATA_BYTES = 128 * 1024
 MAX_APK_BYTES = 100 * 1024 * 1024
+PINNED_CERTIFICATE_SHA256 = "3567e430a196e39a4b21045757c98d83756569777cff2bb3d2835fa6e813e5e7"
 
 
 @dataclass
@@ -95,6 +96,8 @@ def validate_release_metadata(metadata: object) -> dict:
         raise RuntimeError("Release metadata has the wrong application ID")
     if metadata.get("abi") != "arm64-v8a":
         raise RuntimeError("Release metadata has the wrong ABI")
+    if metadata.get("certificate_sha256") != PINNED_CERTIFICATE_SHA256:
+        raise RuntimeError("Release metadata has the wrong signing certificate")
     if not isinstance(metadata.get("version_code"), int) or metadata["version_code"] <= 0:
         raise RuntimeError("Release metadata has an invalid version code")
     digest = str(metadata.get("sha256", ""))
@@ -104,6 +107,19 @@ def validate_release_metadata(metadata: object) -> dict:
     if not re.fullmatch(r"nspanel-companion-[A-Za-z0-9._-]+-arm64\.apk", apk):
         raise RuntimeError("Release metadata has an invalid APK name")
     return metadata
+
+
+def apk_certificate_sha256(apk: Path) -> str:
+    keytool = shutil.which("keytool")
+    if not keytool:
+        raise RuntimeError("keytool is required to verify the APK signing certificate")
+    result = run([keytool, "-printcert", "-jarfile", str(apk)], 30)
+    if result.returncode:
+        raise RuntimeError("Unable to read the APK signing certificate")
+    match = re.search(r"SHA256:\s*([0-9A-F:]{95})", result.stdout, re.IGNORECASE)
+    if not match:
+        raise RuntimeError("APK signing certificate fingerprint is unavailable")
+    return match.group(1).replace(":", "").lower()
 
 
 def download_github_release(repository: str, channel: str, cache: Path) -> tuple[Path, dict]:
@@ -125,6 +141,9 @@ def download_github_release(repository: str, channel: str, cache: Path) -> tuple
         raise RuntimeError("Downloaded APK checksum does not match release metadata")
     temporary = destination.with_suffix(".apk.part")
     temporary.write_bytes(payload)
+    if apk_certificate_sha256(temporary) != PINNED_CERTIFICATE_SHA256:
+        temporary.unlink(missing_ok=True)
+        raise RuntimeError("Downloaded APK has the wrong signing certificate")
     temporary.replace(destination)
     (destination.parent / "release.json").write_text(json.dumps(metadata, indent=2, sort_keys=True) + "\n")
     return destination, metadata

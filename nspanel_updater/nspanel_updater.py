@@ -9,6 +9,7 @@ import hashlib
 import ipaddress
 import json
 import re
+import shutil
 import socket
 import subprocess
 import tempfile
@@ -17,6 +18,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 PACKAGE = "dev.hacompanion.panel"
+PINNED_CERTIFICATE_SHA256 = "3567e430a196e39a4b21045757c98d83756569777cff2bb3d2835fa6e813e5e7"
 
 
 def run(args: list[str], timeout: int = 10) -> subprocess.CompletedProcess[str]:
@@ -113,6 +115,8 @@ def release_apk(repository: str, channel: str) -> tuple[Path, dict]:
     metadata = fetch_json(metadata_asset["browser_download_url"])
     if metadata.get("application_id") != PACKAGE or metadata.get("abi") != "arm64-v8a":
         raise RuntimeError("Release metadata is not for this app/device ABI")
+    if metadata.get("certificate_sha256") != PINNED_CERTIFICATE_SHA256:
+        raise RuntimeError("Release metadata has the wrong signing certificate")
     name = str(metadata.get("apk", ""))
     digest = str(metadata.get("sha256", ""))
     if not re.fullmatch(r"nspanel-companion-[A-Za-z0-9._-]+-arm64\.apk", name) or not re.fullmatch(r"[0-9a-f]{64}", digest):
@@ -126,6 +130,15 @@ def release_apk(repository: str, channel: str) -> tuple[Path, dict]:
     if len(payload) > 100 * 1024 * 1024 or hashlib.sha256(payload).hexdigest() != digest:
         raise RuntimeError("Release APK failed verification")
     destination.write_bytes(payload)
+    keytool = shutil.which("keytool")
+    if not keytool:
+        raise RuntimeError("keytool is required to verify the APK signer")
+    certificate = run([keytool, "-printcert", "-jarfile", str(destination)], 30)
+    match = re.search(r"SHA256:\s*([0-9A-F:]{95})", certificate.stdout, re.IGNORECASE)
+    fingerprint = match.group(1).replace(":", "").lower() if certificate.returncode == 0 and match else ""
+    if fingerprint != PINNED_CERTIFICATE_SHA256:
+        destination.unlink(missing_ok=True)
+        raise RuntimeError("Release APK has the wrong signing certificate")
     return destination, metadata
 
 

@@ -54,6 +54,7 @@ class UpdaterTest(unittest.TestCase):
         metadata = {
             "application_id": updater.PACKAGE,
             "abi": "arm64-v8a",
+            "certificate_sha256": updater.PINNED_CERTIFICATE_SHA256,
             "apk": "nspanel-companion-1.0.0-arm64.apk",
             "sha256": digest,
             "version": "1.0.0",
@@ -65,7 +66,8 @@ class UpdaterTest(unittest.TestCase):
         ]}
         with tempfile.TemporaryDirectory() as directory, \
                 patch.object(updater, "fetch_json", side_effect=[[release], metadata]), \
-                patch.object(updater, "read_url", return_value=payload):
+                patch.object(updater, "read_url", return_value=payload), \
+                patch.object(updater, "apk_certificate_sha256", return_value=updater.PINNED_CERTIFICATE_SHA256):
             apk, result = updater.download_github_release("owner/repo", "stable", Path(directory))
             self.assertEqual(payload, apk.read_bytes())
             self.assertEqual(metadata, result)
@@ -75,6 +77,7 @@ class UpdaterTest(unittest.TestCase):
         metadata = {
             "application_id": updater.PACKAGE,
             "abi": "arm64-v8a",
+            "certificate_sha256": updater.PINNED_CERTIFICATE_SHA256,
             "apk": "nspanel-companion-1.0.0-arm64.apk",
             "sha256": "a" * 64,
             "version": "1.0.0",
@@ -89,6 +92,19 @@ class UpdaterTest(unittest.TestCase):
                 patch.object(updater, "read_url", return_value=payload):
             with self.assertRaises(RuntimeError):
                 updater.download_github_release("owner/repo", "stable", Path(directory))
+
+    def test_rejects_wrong_release_certificate(self):
+        metadata = {
+            "application_id": updater.PACKAGE,
+            "abi": "arm64-v8a",
+            "certificate_sha256": "0" * 64,
+            "apk": "nspanel-companion-1.0.0-arm64.apk",
+            "sha256": "a" * 64,
+            "version": "1.0.0",
+            "version_code": 1_000_099,
+        }
+        with self.assertRaises(RuntimeError):
+            updater.validate_release_metadata(metadata)
 
 
 if __name__ == "__main__":
