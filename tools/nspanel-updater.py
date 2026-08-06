@@ -22,7 +22,7 @@ from urllib.request import Request, urlopen
 
 PACKAGE = "dev.hacompanion.panel"
 DEFAULT_ADB_PORT = 5555
-DEFAULT_REPOSITORY = "dmitrogajduk/ha-companion"
+DEFAULT_REPOSITORY = "fulminant/ha-nspanel-companion"
 DEFAULT_CACHE = Path.home() / ".cache" / "nspanel-companion"
 MAX_METADATA_BYTES = 128 * 1024
 MAX_APK_BYTES = 100 * 1024 * 1024

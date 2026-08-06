@@ -76,7 +76,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             self.send_json(HTTPStatus.OK, {
                 "id": STATE["id"], "name": STATE["name"],
-                "paired": bool(STATE["token"]), "version": "0.3.1",
+                "paired": bool(STATE["token"]), "version": "0.3.2",
             })
             return
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
@@ -119,7 +119,7 @@ class Handler(BaseHTTPRequestHandler):
                         if body.get("migrate_debug"):
                             arguments.append("--migrate-debug")
                     elif source == "github":
-                        repository = str(OPTIONS.get("repository") or "dmitrogajduk/ha-companion")
+                        repository = str(OPTIONS.get("repository") or "fulminant/ha-nspanel-companion")
                         channel = str(OPTIONS.get("channel") or "stable")
                         arguments = [
                             "update", address, "--github", "--repository", repository,

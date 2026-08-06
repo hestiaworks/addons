@@ -244,7 +244,7 @@ def main() -> int:
     install.add_argument("address")
     install.add_argument("--github", action="store_true")
     install.add_argument("--local-release")
-    install.add_argument("--repository", default="dmitrogajduk/ha-companion")
+    install.add_argument("--repository", default="fulminant/ha-nspanel-companion")
     install.add_argument("--channel", choices=["stable", "prerelease"], default="stable")
     install.add_argument("--yes", action="store_true")
     install.add_argument("--set-home", action="store_true")
