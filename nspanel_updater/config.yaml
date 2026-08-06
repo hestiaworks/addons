@@ -1,0 +1,24 @@
+name: "NSPanel Companion Updater"
+description: "Discover and safely update NSPanel Companion devices over network ADB"
+version: "0.1.1"
+slug: "nspanel_companion_updater"
+init: false
+arch:
+  - aarch64
+  - amd64
+startup: services
+boot: auto
+host_network: true
+ports:
+  8098/tcp: 8098
+ports_description:
+  8098/tcp: "Local updater API"
+options:
+  subnet: "192.168.0.0/24"
+  repository: "dmitrogajduk/ha-companion"
+  channel: "stable"
+schema:
+  subnet: str
+  repository: str
+  channel: list(stable|prerelease)
+stage: experimental
