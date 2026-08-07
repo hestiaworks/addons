@@ -119,7 +119,7 @@ class Handler(BaseHTTPRequestHandler):
                         if body.get("migrate_debug"):
                             arguments.append("--migrate-debug")
                     elif source == "github":
-                        repository = str(OPTIONS.get("repository") or "fulminant/ha-nspanel-companion")
+                        repository = str(OPTIONS.get("repository") or "hestiaworks/nspanel-companion-app")
                         channel = str(OPTIONS.get("channel") or "stable")
                         arguments = [
                             "update", address, "--github", "--repository", repository,
