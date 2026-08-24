@@ -51,6 +51,21 @@ def is_loopback(address: str) -> bool:
     return address in {"127.0.0.1", "::1"}
 
 
+def startup_lines() -> list[str]:
+    """Return what to print at start.
+
+    The pairing code is only printed while unpaired. It is persisted now, so a
+    code left in a log stays valid, and add-on logs are routinely pasted into
+    issue reports.
+    """
+    if STATE["token"]:
+        return ["Updater paired with Home Assistant."]
+    return [
+        f"NSPanel Updater pairing code: {PAIR_CODE}",
+        "Open NSPanel Companion in Home Assistant to pair this updater.",
+    ]
+
+
 def run_tool(arguments: list[str], timeout: int) -> tuple[int, str, str]:
     result = subprocess.run(
         ["python3", TOOL, *arguments], text=True, capture_output=True,
@@ -178,6 +193,6 @@ class Handler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    print(f"NSPanel Updater pairing code: {PAIR_CODE}", flush=True)
-    print("Open NSPanel Companion in Home Assistant to pair this updater.", flush=True)
+    for line in startup_lines():
+        print(line, flush=True)
     ThreadingHTTPServer(("0.0.0.0", 8098), Handler).serve_forever()

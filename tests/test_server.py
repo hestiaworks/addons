@@ -118,6 +118,20 @@ class PairCodeLifetimeTest(unittest.TestCase):
                 _, offered = get(f"{base}/api/pair-code")
                 self.assertNotEqual(used, offered["code"])
 
+    def test_code_is_logged_only_while_unpaired(self):
+        """Add-on logs get pasted into issue reports; a live code must not sit there."""
+        with tempfile.TemporaryDirectory() as data:
+            server = load_server(data)
+            code = server.PAIR_CODE
+
+            unpaired = server.startup_lines()
+            self.assertTrue(any(code in line for line in unpaired))
+
+            server.STATE["token"] = "already-paired"
+            paired = server.startup_lines()
+            self.assertFalse(any(code in line for line in paired))
+            self.assertTrue(any("paired" in line.lower() for line in paired))
+
     def test_pairing_code_is_six_digits(self):
         with tempfile.TemporaryDirectory() as data:
             code = load_server(data).PAIR_CODE
