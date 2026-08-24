@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
 import subprocess
 import threading
@@ -11,7 +12,8 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-DATA = Path("/data")
+# Overridable so the module can be imported in tests without touching /data.
+DATA = Path(os.environ.get("NSPANEL_UPDATER_DATA", "/data"))
 STATE_FILE = DATA / "state.json"
 OPTIONS_FILE = DATA / "options.json"
 TOOL = "/app/nspanel_updater.py"
@@ -32,8 +34,21 @@ STATE = read_json(STATE_FILE, {})
 STATE.setdefault("id", secrets.token_hex(8))
 STATE.setdefault("name", "NSPanel Companion Updater")
 STATE.setdefault("token", "")
-PAIR_CODE = f"{secrets.randbelow(1_000_000):06d}"
+# Persisted rather than regenerated per start: a restart during pairing would
+# otherwise silently invalidate the code Home Assistant is about to send.
+STATE.setdefault("pair_code", f"{secrets.randbelow(1_000_000):06d}")
+PAIR_CODE = STATE["pair_code"]
 STATE_FILE.write_text(json.dumps(STATE))
+
+
+def is_loopback(address: str) -> bool:
+    """Return whether a request originated on this host.
+
+    The pairing code authorises pairing, so it is only ever disclosed to the
+    host itself. A LAN client cannot forge this: it would have to complete a
+    TCP handshake from a spoofed source address.
+    """
+    return address in {"127.0.0.1", "::1"}
 
 
 def run_tool(arguments: list[str], timeout: int) -> tuple[int, str, str]:
@@ -73,6 +88,18 @@ class Handler(BaseHTTPRequestHandler):
         return bool(STATE["token"]) and secrets.compare_digest(token, STATE["token"])
 
     def do_GET(self) -> None:
+        if self.path == "/api/pair-code":
+            # Disclosed to the host only, so Home Assistant can pair without a
+            # human copying the code out of the add-on log.
+            if not is_loopback(self.client_address[0]):
+                self.send_json(HTTPStatus.FORBIDDEN, {
+                    "error": "The pairing code is only available on the local host"
+                })
+                return
+            self.send_json(HTTPStatus.OK, {
+                "id": STATE["id"], "name": STATE["name"], "code": PAIR_CODE,
+            })
+            return
         if self.path == "/api/status":
             self.send_json(HTTPStatus.OK, {
                 "id": STATE["id"], "name": STATE["name"],
@@ -82,13 +109,17 @@ class Handler(BaseHTTPRequestHandler):
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})
 
     def do_POST(self) -> None:
+        global PAIR_CODE
         try:
             if self.path == "/api/pair":
                 body = self.json_body()
-                if str(body.get("code", "")) != PAIR_CODE:
+                if not secrets.compare_digest(str(body.get("code", "")), PAIR_CODE):
                     self.send_json(HTTPStatus.FORBIDDEN, {"error": "Invalid pairing code"})
                     return
                 STATE["token"] = secrets.token_urlsafe(32)
+                # Consume the code. Persisting it means it would otherwise remain
+                # a standing key to the updater for anyone who ever saw it.
+                PAIR_CODE = STATE["pair_code"] = f"{secrets.randbelow(1_000_000):06d}"
                 STATE_FILE.write_text(json.dumps(STATE))
                 self.send_json(HTTPStatus.OK, {
                     "id": STATE["id"], "name": STATE["name"], "token": STATE["token"]
