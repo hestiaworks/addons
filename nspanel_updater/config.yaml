@@ -1,6 +1,6 @@
 name: "NSPanel Companion Updater"
 description: "Discover and safely update NSPanel Companion devices over network ADB"
-version: "0.3.4"
+version: "0.3.5"
 slug: "nspanel_companion_updater"
 init: false
 arch:
