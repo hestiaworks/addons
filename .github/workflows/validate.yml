@@ -21,3 +21,62 @@ jobs:
           python3 -m unittest discover -s tests -p 'test_*.py'
           python3 -m py_compile tools/nspanel-updater.py nspanel_updater/nspanel_updater.py nspanel_updater/server.py
           bash -n nspanel_updater/run.sh
+
+  version:
+    name: Version bump
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      # The add-on store installs from the default branch and offers an update
+      # only when config.yaml declares a new version. A change merged without a
+      # bump reaches nobody and fails silently, so make it fail loudly instead.
+      - name: Require a version bump when the add-on changes
+        env:
+          BASE_SHA: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          read_version() { sed -n 's/^version: *"\([^"]*\)".*/\1/p' "$1"; }
+
+          case "$BASE_SHA" in
+            ''|0000000000000000000000000000000000000000)
+              echo "No base commit to compare against; nothing to check."
+              exit 0
+              ;;
+          esac
+          if ! git cat-file -e "${BASE_SHA}^{commit}" 2>/dev/null; then
+            echo "Base commit $BASE_SHA is unavailable; nothing to check."
+            exit 0
+          fi
+
+          if [ -z "$(git diff --name-only "$BASE_SHA" HEAD -- nspanel_updater/)" ]; then
+            echo "Add-on sources unchanged; no bump required."
+            exit 0
+          fi
+
+          NEW="$(read_version nspanel_updater/config.yaml)"
+          OLD="$(git show "$BASE_SHA:nspanel_updater/config.yaml" 2>/dev/null | sed -n 's/^version: *"\([^"]*\)".*/\1/p')"
+          if [ -z "$OLD" ]; then
+            echo "Add-on is new in this change; version $NEW accepted."
+            exit 0
+          fi
+          if [ "$OLD" = "$NEW" ]; then
+            echo "nspanel_updater/ changed but config.yaml is still version $NEW." >&2
+            echo "The add-on store would never offer this change to an existing install." >&2
+            exit 1
+          fi
+          echo "Version moved $OLD -> $NEW."
+
+  image:
+    name: Add-on image
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      # A broken Dockerfile otherwise surfaces only when a user installs the
+      # add-on, where the failure is a Supervisor log nobody is watching.
+      - name: Build the add-on image
+        run: docker build --pull -t nspanel-updater-check nspanel_updater
+      - name: Check the packaged tools exist in the image
+        run: |
+          docker run --rm --entrypoint sh nspanel-updater-check -c \
+            'command -v adb && command -v keytool && python3 -c "import ast;[ast.parse(open(f).read()) for f in (\"/app/server.py\",\"/app/nspanel_updater.py\")]"'
