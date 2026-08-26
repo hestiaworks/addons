@@ -183,3 +183,27 @@ class ReleaseChannelDefaultTest(unittest.TestCase):
             if line.strip().startswith("channel:") and "list(" not in line
         )
         self.assertEqual("prerelease", default)
+
+
+class OptionsFreshnessTest(unittest.TestCase):
+    """Changing an add-on option in the UI must take effect.
+
+    Options were read once at import, so a channel changed in Home Assistant
+    kept resolving against the value the container started with. The failure
+    was silent and looked like the setting had not saved.
+    """
+
+    def test_an_option_changed_after_start_is_used(self):
+        with tempfile.TemporaryDirectory() as data:
+            options = Path(data) / "options.json"
+            options.write_text(json.dumps({"channel": "stable"}))
+            server = load_server(data)
+            self.assertEqual("stable", server.options().get("channel"))
+
+            options.write_text(json.dumps({"channel": "prerelease"}))
+            self.assertEqual("prerelease", server.options().get("channel"))
+
+    def test_a_missing_options_file_reads_as_empty(self):
+        with tempfile.TemporaryDirectory() as data:
+            server = load_server(data)
+            self.assertEqual({}, server.options())

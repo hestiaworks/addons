@@ -33,7 +33,17 @@ def read_json(path: Path, fallback: dict) -> dict:
         return fallback
 
 
-OPTIONS = read_json(OPTIONS_FILE, {})
+def options() -> dict:
+    """The add-on options as they are now.
+
+    Read per request rather than once at import: Home Assistant rewrites this
+    file when the user saves the configuration, and caching it meant a channel
+    changed in the UI kept resolving against the value the container started
+    with, with nothing to say so.
+    """
+    return read_json(OPTIONS_FILE, {})
+
+
 STATE = read_json(STATE_FILE, {})
 STATE.setdefault("id", secrets.token_hex(8))
 STATE.setdefault("name", "NSPanel Companion Updater")
@@ -149,7 +159,7 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self.path == "/api/discover":
                 body = self.json_body()
-                subnet = str(body.get("subnet") or OPTIONS.get("subnet") or "")
+                subnet = str(body.get("subnet") or options().get("subnet") or "")
                 code, stdout, stderr = run_tool(["discover", "--subnet", subnet, "--json"], 90)
                 if code:
                     raise RuntimeError(stderr or "Discovery failed")
@@ -162,15 +172,16 @@ class Handler(BaseHTTPRequestHandler):
                 if classification not in {"nspanel-companion", "probable-nspanel"}:
                     raise ValueError("Refusing to modify an unverified Android device")
                 source = str(body.get("source") or "github")
+                settings = options()
                 with LOCK:
                     if source == "local":
-                        release_directory = str(OPTIONS.get("local_release_directory") or "")
+                        release_directory = str(settings.get("local_release_directory") or "")
                         arguments = ["update", address, "--local-release", release_directory, "--yes", "--set-home"]
                         if body.get("migrate_debug"):
                             arguments.append("--migrate-debug")
                     elif source == "github":
-                        repository = str(OPTIONS.get("repository") or "hestiaworks/nspanel-companion-app")
-                        channel = str(OPTIONS.get("channel") or "stable")
+                        repository = str(settings.get("repository") or "hestiaworks/nspanel-companion-app")
+                        channel = str(settings.get("channel") or "prerelease")
                         arguments = [
                             "update", address, "--github", "--repository", repository,
                             "--channel", channel, "--yes", "--set-home",
