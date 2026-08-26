@@ -10,6 +10,11 @@ FROM ghcr.io/home-assistant/base:3.24-2026.08.0@sha256:93ef607824e3f27e868f11b10
 # certificate. Without either, the updater cannot verify what it installs.
 RUN apk add --no-cache android-tools openjdk17-jre-headless python3
 
+# The supervisor passes the add-on version as a build argument; carrying it
+# into the image is what lets /api/status report what is actually running.
+ARG BUILD_VERSION
+ENV NSPANEL_UPDATER_VERSION=${BUILD_VERSION}
+
 COPY run.sh /run.sh
 COPY server.py /app/server.py
 COPY nspanel_updater.py /app/nspanel_updater.py

@@ -17,6 +17,10 @@ DATA = Path(os.environ.get("NSPANEL_UPDATER_DATA", "/data"))
 STATE_FILE = DATA / "state.json"
 OPTIONS_FILE = DATA / "options.json"
 TOOL = "/app/nspanel_updater.py"
+# Stamped into the image from the add-on version at build time. Typing a
+# version in here instead let it drift three releases behind config.yaml,
+# which made a running add-on indistinguishable from an old one.
+VERSION = os.environ.get("NSPANEL_UPDATER_VERSION") or "unknown"
 MAX_BODY = 16 * 1024
 LOCK = threading.Lock()
 
@@ -118,7 +122,7 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/status":
             self.send_json(HTTPStatus.OK, {
                 "id": STATE["id"], "name": STATE["name"],
-                "paired": bool(STATE["token"]), "version": "0.3.2",
+                "paired": bool(STATE["token"]), "version": VERSION,
             })
             return
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "Not found"})

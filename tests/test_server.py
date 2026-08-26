@@ -140,3 +140,46 @@ class PairCodeLifetimeTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReportedVersionTest(unittest.TestCase):
+    """The status endpoint is how anyone asks what is actually deployed.
+
+    It reported a string typed into server.py, which drifted three releases
+    behind config.yaml and made a running add-on indistinguishable from an old
+    one.
+    """
+
+    def test_status_reports_the_version_the_image_was_built_from(self):
+        with tempfile.TemporaryDirectory() as data:
+            os.environ["NSPANEL_UPDATER_VERSION"] = "9.9.9"
+            try:
+                server = load_server(data)
+                with running(server) as base:
+                    status, payload = get(f"{base}/api/status")
+            finally:
+                del os.environ["NSPANEL_UPDATER_VERSION"]
+            self.assertEqual(200, status)
+            self.assertEqual("9.9.9", payload["version"])
+
+    def test_an_unstamped_image_says_so_rather_than_inventing_a_number(self):
+        with tempfile.TemporaryDirectory() as data:
+            os.environ.pop("NSPANEL_UPDATER_VERSION", None)
+            server = load_server(data)
+            with running(server) as base:
+                status, payload = get(f"{base}/api/status")
+            self.assertEqual(200, status)
+            self.assertEqual("unknown", payload["version"])
+
+
+class ReleaseChannelDefaultTest(unittest.TestCase):
+    def test_the_default_channel_can_reach_a_release_that_exists(self):
+        """Every release so far is a prerelease, and the release picker skips
+        those on the stable channel, so the shipped default could only error."""
+        config = (Path(__file__).parents[1] / "nspanel_updater/config.yaml").read_text()
+        default = next(
+            line.split(":", 1)[1].strip().strip('"')
+            for line in config.splitlines()
+            if line.strip().startswith("channel:") and "list(" not in line
+        )
+        self.assertEqual("prerelease", default)

@@ -1,6 +1,6 @@
 name: "NSPanel Companion Updater"
 description: "Discover and safely update NSPanel Companion devices over network ADB"
-version: "0.4.1"
+version: "0.5.0"
 slug: "nspanel_companion_updater"
 init: false
 arch:
@@ -19,7 +19,9 @@ ports_description:
 options:
   subnet: "192.168.0.0/24"
   repository: "hestiaworks/nspanel-companion-app"
-  channel: "stable"
+  # Every release so far is a prerelease, and the picker skips those on
+  # the stable channel. Flip this back when a stable release exists.
+  channel: "prerelease"
   local_release_directory: "/share/nspanel-companion-release"
 schema:
   subnet: str
