@@ -8,6 +8,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest.mock import patch
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
@@ -207,3 +208,40 @@ class OptionsFreshnessTest(unittest.TestCase):
         with tempfile.TemporaryDirectory() as data:
             server = load_server(data)
             self.assertEqual({}, server.options())
+
+
+class ReleaseErrorMessageTest(unittest.TestCase):
+    """A failure the user can act on.
+
+    'No stable release is available' is true and useless: it does not say that
+    prereleases were skipped, that there were any, or which setting to change.
+    """
+
+    def load_updater(self):
+        path = Path(__file__).parents[1] / "nspanel_updater/nspanel_updater.py"
+        spec = spec_from_file_location("shipped_updater", path)
+        module = module_from_spec(spec)
+        assert spec and spec.loader
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
+    def test_it_says_prereleases_were_skipped_and_how_to_include_them(self):
+        updater = self.load_updater()
+        releases = [
+            {"tag_name": "v1.0.0-rc.1", "draft": False, "prerelease": True},
+            {"tag_name": "v1.0.0-beta.5", "draft": False, "prerelease": True},
+        ]
+        with patch.object(updater, "fetch_json", return_value=releases):
+            with self.assertRaises(RuntimeError) as raised:
+                updater.release_apk("owner/repo", "stable")
+        message = str(raised.exception)
+        self.assertIn("2 prerelease(s) were skipped", message)
+        self.assertIn("channel", message)
+
+    def test_a_genuinely_empty_repository_says_only_that(self):
+        updater = self.load_updater()
+        with patch.object(updater, "fetch_json", return_value=[]):
+            with self.assertRaises(RuntimeError) as raised:
+                updater.release_apk("owner/repo", "stable")
+        self.assertEqual("No stable release is available", str(raised.exception))

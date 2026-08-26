@@ -107,7 +107,12 @@ def release_apk(repository: str, channel: str) -> tuple[Path, dict]:
     releases = fetch_json(f"https://api.github.com/repos/{repository}/releases")
     release = next((item for item in releases if not item.get("draft") and (channel == "prerelease" or not item.get("prerelease"))), None)
     if not release:
-        raise RuntimeError(f"No {channel} release is available")
+        skipped = sum(1 for item in releases if not item.get("draft") and item.get("prerelease"))
+        raise RuntimeError(
+            f"No {channel} release is available"
+            + (f"; {skipped} prerelease(s) were skipped, so set the add-on's channel option to prerelease"
+               if channel != "prerelease" and skipped else "")
+        )
     assets = {item["name"]: item for item in release.get("assets", [])}
     metadata_asset = assets.get("release.json")
     if not metadata_asset:
