@@ -18,8 +18,8 @@ SPEC.loader.exec_module(updater)
 
 class UpdaterTest(unittest.TestCase):
     def test_accepts_small_private_network(self):
-        network = updater.parse_subnet("192.168.7.0/24")
-        self.assertEqual("192.168.7.0/24", str(network))
+        network = updater.parse_subnet("192.0.2.0/24")
+        self.assertEqual("192.0.2.0/24", str(network))
 
     def test_rejects_public_or_overly_broad_network(self):
         with self.assertRaises(ValueError):
@@ -28,7 +28,7 @@ class UpdaterTest(unittest.TestCase):
             updater.parse_subnet("10.0.0.0/8")
 
     def test_panel_record_defaults_to_unknown_and_uninstalled(self):
-        panel = updater.Panel("192.168.1.2:5555", "device")
+        panel = updater.Panel("192.0.2.6:5555", "device")
         self.assertEqual("unknown-android", panel.classification)
         self.assertIsNone(panel.app_version)
 
