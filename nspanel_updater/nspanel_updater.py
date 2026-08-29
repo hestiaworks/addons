@@ -18,6 +18,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 
 PACKAGE = "dev.hacompanion.panel"
+SECURE_SETTINGS_PERMISSION = "android.permission.WRITE_SECURE_SETTINGS"
 PINNED_CERTIFICATE_SHA256 = "3567e430a196e39a4b21045757c98d83756569777cff2bb3d2835fa6e813e5e7"
 
 
@@ -177,6 +178,35 @@ def verify_local_release(directory: str) -> tuple[Path, dict]:
     return apk, metadata
 
 
+def grant_secure_settings(serial: str) -> bool:
+    """Give the app WRITE_SECURE_SETTINGS, and say whether it now holds it.
+
+    The permission is what lets the panel suppress Android's navigation bar
+    outright and hide the vendor's floating back button, rather than chasing
+    them after the fact. It is a development permission, so `pm grant` can
+    hand it over even though a normal install cannot request it.
+
+    This never raises. A panel that does not get the permission is one whose
+    navigation bar setting does nothing — not a broken installation — and
+    refusing to finish an update over it would be the worse outcome. The
+    caller reports the result instead.
+    """
+    run(["adb", "-s", serial, "shell", "pm", "grant", PACKAGE, SECURE_SETTINGS_PERMISSION])
+    # `pm grant` exits zero for a permission the APK never declared, so its
+    # own result proves nothing. Read the state back instead.
+    output = shell(serial, f"dumpsys package {PACKAGE}", 20)
+    return f"{SECURE_SETTINGS_PERMISSION}: granted=true" in output
+
+
+def grant_summary(granted: bool) -> str:
+    if granted:
+        return " Advanced display control enabled."
+    return (
+        " The permission for suppressing the navigation bar could not be granted;"
+        " that setting will have no effect on this panel."
+    )
+
+
 def default_home(serial: str) -> str:
     output = shell(serial, "cmd package resolve-activity --brief -a android.intent.action.MAIN -c android.intent.category.HOME")
     return next((line for line in reversed(output.splitlines()) if "/" in line and "=" not in line), "")
@@ -226,6 +256,7 @@ def update(
         raise RuntimeError((result.stdout + result.stderr).strip() or "ADB installation failed")
     if set_home or restore_home or not panel.get("app_version"):
         set_and_verify_home(serial)
+    granted = grant_secure_settings(serial)
     start = run(["adb", "-s", serial, "shell", "am", "start", "-n", f"{PACKAGE}/.MainActivity"])
     if start.returncode:
         raise RuntimeError("App installed but could not be started")
@@ -236,7 +267,10 @@ def update(
     else:
         raise RuntimeError("App installed but did not remain running")
     migration = " Debug installation was removed." if signature_mismatch and migrate_debug else ""
-    return f"Updated {serial} to {metadata['version']}; Home app restored.{migration}"
+    return (
+        f"Updated {serial} to {metadata['version']}; Home app restored."
+        f"{migration}{grant_summary(granted)}"
+    )
 
 
 def main() -> int:
