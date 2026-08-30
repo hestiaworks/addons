@@ -178,6 +178,19 @@ def verify_local_release(directory: str) -> tuple[Path, dict]:
     return apk, metadata
 
 
+def reboot_device(serial: str) -> None:
+    """Reboot the panel itself, not just its app.
+
+    Android gives an app no way to restart the device it runs on, so this is
+    the only route that actually power-cycles Android — and it is the one
+    worth having when the app coming back is not enough.
+
+    Nothing is confirmed: adb reboot returns as soon as the command is
+    accepted and the panel stops answering immediately afterwards.
+    """
+    run(["adb", "-s", serial, "reboot"], 30)
+
+
 def restart_app(serial: str) -> bool:
     """Stop the panel app and start it again, over ADB.
 
@@ -309,6 +322,7 @@ def main() -> int:
     install.add_argument("--migrate-debug", action="store_true")
     relaunch = commands.add_parser("restart")
     relaunch.add_argument("address")
+    relaunch.add_argument("--device", action="store_true")
     args = parser.parse_args()
     try:
         if args.command == "discover":
@@ -317,9 +331,13 @@ def main() -> int:
             panel = inspect(args.address)
             if panel["adb_state"] != "device":
                 raise RuntimeError("Panel is not reachable over ADB")
-            if not restart_app(panel["address"]):
+            if args.device:
+                reboot_device(panel["address"])
+                print(f"Rebooting {panel['address']}; it will be back in a minute.")
+            elif not restart_app(panel["address"]):
                 raise RuntimeError("App did not come back after restarting")
-            print(f"Restarted the app on {panel['address']}.")
+            else:
+                print(f"Restarted the app on {panel['address']}.")
         else:
             if not args.github and not args.local_release:
                 raise ValueError("Select --github or --local-release")

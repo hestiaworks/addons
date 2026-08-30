@@ -74,5 +74,18 @@ class SecureSettingsGrantTest(unittest.TestCase):
             self.assertFalse(updater.restart_app("192.0.2.7:5555"))
 
 
+    def test_reboots_the_device_rather_than_the_app(self):
+        """A reboot is the device, not the process.
+
+        adb reboot returns as soon as the command is accepted, so there is
+        nothing to confirm here and nothing to wait for — the panel is on
+        its way down and will not answer again for a minute.
+        """
+        with patch.object(updater, "run") as fake_run:
+            updater.reboot_device("192.0.2.7:5555")
+        commands = [" ".join(call[0][0]) for call in fake_run.call_args_list]
+        self.assertTrue(any(c.endswith("reboot") for c in commands), commands)
+
+
 if __name__ == "__main__":
     unittest.main()

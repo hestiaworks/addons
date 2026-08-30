@@ -196,8 +196,11 @@ class Handler(BaseHTTPRequestHandler):
             if self.path == "/api/restart":
                 body = self.json_body()
                 address = str(body.get("address", ""))
+                arguments = ["restart", address]
+                if body.get("device"):
+                    arguments.append("--device")
                 with LOCK:
-                    code, stdout, stderr = run_tool(["restart", address], 120)
+                    code, stdout, stderr = run_tool(arguments, 120)
                 if code:
                     raise RuntimeError(stderr or stdout or "Restart failed")
                 self.send_json(HTTPStatus.OK, {"ok": True, "message": stdout})
