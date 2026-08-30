@@ -55,5 +55,24 @@ class SecureSettingsGrantTest(unittest.TestCase):
             with self.subTest(granted=granted):
                 self.assertIn(expected, updater.grant_summary(granted))
 
+    def test_restarts_the_app_and_confirms_it_came_back(self):
+        """The reason this path exists is a panel that stopped answering.
+
+        So it cannot ask the app whether it restarted — it has to look. A
+        pid that is present after the relaunch is the only evidence that
+        means anything here.
+        """
+        with patch.object(updater, "run") as fake_run, \
+                patch.object(updater, "shell", side_effect=["", "4242"]):
+            self.assertTrue(updater.restart_app("192.0.2.7:5555"))
+        commands = " ".join(" ".join(call[0][0]) for call in fake_run.call_args_list)
+        self.assertIn("force-stop", commands)
+        self.assertIn("dev.hacompanion.panel/.MainActivity", commands)
+
+    def test_reports_a_restart_that_did_not_come_back(self):
+        with patch.object(updater, "run"), patch.object(updater, "shell", return_value=""):
+            self.assertFalse(updater.restart_app("192.0.2.7:5555"))
+
+
 if __name__ == "__main__":
     unittest.main()

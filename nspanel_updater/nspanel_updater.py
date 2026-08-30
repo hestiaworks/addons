@@ -178,6 +178,25 @@ def verify_local_release(directory: str) -> tuple[Path, dict]:
     return apk, metadata
 
 
+def restart_app(serial: str) -> bool:
+    """Stop the panel app and start it again, over ADB.
+
+    This exists for a panel that has stopped answering Home Assistant, so it
+    cannot be asked whether it worked — it has to be looked at. A pid after
+    the relaunch is the only evidence worth anything here.
+
+    Nothing is uninstalled and no data is touched: the app comes back paired,
+    with the layout it already had.
+    """
+    run(["adb", "-s", serial, "shell", "am", "force-stop", PACKAGE], 30)
+    run(["adb", "-s", serial, "shell", "am", "start", "-n", f"{PACKAGE}/.MainActivity"], 30)
+    for _ in range(10):
+        if shell(serial, f"pidof {PACKAGE}"):
+            return True
+        time.sleep(1)
+    return False
+
+
 def grant_secure_settings(serial: str) -> bool:
     """Give the app WRITE_SECURE_SETTINGS, and say whether it now holds it.
 
@@ -288,10 +307,19 @@ def main() -> int:
     install.add_argument("--yes", action="store_true")
     install.add_argument("--set-home", action="store_true")
     install.add_argument("--migrate-debug", action="store_true")
+    relaunch = commands.add_parser("restart")
+    relaunch.add_argument("address")
     args = parser.parse_args()
     try:
         if args.command == "discover":
             print(json.dumps(discover(args.subnet)))
+        elif args.command == "restart":
+            panel = inspect(args.address)
+            if panel["adb_state"] != "device":
+                raise RuntimeError("Panel is not reachable over ADB")
+            if not restart_app(panel["address"]):
+                raise RuntimeError("App did not come back after restarting")
+            print(f"Restarted the app on {panel['address']}.")
         else:
             if not args.github and not args.local_release:
                 raise ValueError("Select --github or --local-release")

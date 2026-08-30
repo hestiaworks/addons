@@ -193,6 +193,15 @@ class Handler(BaseHTTPRequestHandler):
                     raise RuntimeError(stderr or stdout or "Update failed")
                 self.send_json(HTTPStatus.OK, {"ok": True, "message": stdout})
                 return
+            if self.path == "/api/restart":
+                body = self.json_body()
+                address = str(body.get("address", ""))
+                with LOCK:
+                    code, stdout, stderr = run_tool(["restart", address], 120)
+                if code:
+                    raise RuntimeError(stderr or stdout or "Restart failed")
+                self.send_json(HTTPStatus.OK, {"ok": True, "message": stdout})
+                return
             if self.path == "/api/unpair":
                 STATE["token"] = ""
                 STATE_FILE.write_text(json.dumps(STATE))
