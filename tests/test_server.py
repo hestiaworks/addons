@@ -174,16 +174,92 @@ class ReportedVersionTest(unittest.TestCase):
 
 
 class ReleaseChannelDefaultTest(unittest.TestCase):
-    def test_the_default_channel_can_reach_a_release_that_exists(self):
-        """Every release so far is a prerelease, and the release picker skips
-        those on the stable channel, so the shipped default could only error."""
+    def test_the_default_channel_is_stable(self):
+        """It shipped as prerelease because nothing else existed.
+
+        Every early build was a beta or a release candidate, and the picker
+        skips those on the stable channel, so the stable default could only
+        ever error. Stable releases exist now, and leaving it as it was would
+        mean the next release candidate published for testing is offered to
+        every panel in the house as though it were finished.
+        """
         config = (Path(__file__).parents[1] / "nspanel_updater/config.yaml").read_text()
         default = next(
             line.split(":", 1)[1].strip().strip('"')
             for line in config.splitlines()
             if line.strip().startswith("channel:") and "list(" not in line
         )
-        self.assertEqual("prerelease", default)
+        self.assertEqual("stable", default)
+
+
+class LatestReleaseCacheTest(unittest.TestCase):
+    """Answering "is there anything new" without asking GitHub every time.
+
+    The check runs on a timer. GitHub allows sixty unauthenticated requests
+    an hour from one address, and a lost connection must not become an error
+    someone has to dismiss — so the last good answer is kept and served.
+    """
+
+    def server(self, data: str, channel: str = "stable"):
+        (Path(data) / "options.json").write_text(json.dumps({"channel": channel}))
+        module = load_server(data)
+        module.STATE["token"] = "t"
+        return module
+
+    def test_a_second_look_inside_the_hour_is_free(self):
+        with tempfile.TemporaryDirectory() as data:
+            server = self.server(data)
+            calls = []
+
+            def tool(arguments, timeout):
+                calls.append(arguments)
+                return 0, json.dumps({"version": "1.2.2", "version_code": 1020299}), ""
+
+            server.run_tool = tool
+            first = server.latest_release(now=1_000.0)
+            second = server.latest_release(now=1_100.0)
+
+            self.assertEqual("1.2.2", first["latest"]["version"])
+            self.assertEqual(first["latest"], second["latest"])
+            self.assertEqual(1, len(calls), "the cached answer should have been used")
+            self.assertIn("--channel", calls[0])
+            self.assertIn("stable", calls[0])
+
+    def test_an_hour_later_it_looks_again(self):
+        with tempfile.TemporaryDirectory() as data:
+            server = self.server(data)
+            calls = []
+
+            def tool(arguments, timeout):
+                calls.append(arguments)
+                return 0, json.dumps({"version": "1.2.2", "version_code": 1020299}), ""
+
+            server.run_tool = tool
+            server.latest_release(now=1_000.0)
+            server.latest_release(now=1_000.0 + server.LATEST_TTL + 1)
+            self.assertEqual(2, len(calls))
+
+    def test_a_failed_look_keeps_the_last_answer(self):
+        with tempfile.TemporaryDirectory() as data:
+            server = self.server(data)
+            server.run_tool = lambda arguments, timeout: (
+                0, json.dumps({"version": "1.2.2", "version_code": 1020299}), "",
+            )
+            server.latest_release(now=1_000.0)
+
+            server.run_tool = lambda arguments, timeout: (2, "", "Could not resolve host")
+            later = server.latest_release(now=1_000.0 + server.LATEST_TTL + 1)
+
+            self.assertEqual("1.2.2", later["latest"]["version"])
+            self.assertIn("Could not resolve host", later["error"])
+
+    def test_nothing_known_yet_and_no_internet_says_so_without_inventing(self):
+        with tempfile.TemporaryDirectory() as data:
+            server = self.server(data)
+            server.run_tool = lambda arguments, timeout: (2, "", "Could not resolve host")
+            answer = server.latest_release(now=1_000.0)
+            self.assertIsNone(answer["latest"])
+            self.assertIn("Could not resolve host", answer["error"])
 
 
 class OptionsFreshnessTest(unittest.TestCase):

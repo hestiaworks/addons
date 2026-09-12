@@ -8,6 +8,7 @@ import os
 import secrets
 import subprocess
 import threading
+import time
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -23,6 +24,13 @@ TOOL = "/app/nspanel_updater.py"
 VERSION = os.environ.get("NSPANEL_UPDATER_VERSION") or "unknown"
 MAX_BODY = 16 * 1024
 LOCK = threading.Lock()
+
+# What the last look at GitHub found, and when. A check runs on a timer, and
+# GitHub allows sixty unauthenticated requests an hour from one address —
+# answering from here keeps a poll every few minutes as cheap as one a day,
+# and keeps a badge on screen while the internet is briefly away.
+LATEST_TTL = 3600.0
+LATEST: dict = {"at": 0.0, "value": None, "error": ""}
 
 
 def read_json(path: Path, fallback: dict) -> dict:
@@ -80,6 +88,40 @@ def startup_lines() -> list[str]:
     ]
 
 
+def latest_release(now: float | None = None) -> dict:
+    """What is published for the configured channel, from cache when fresh.
+
+    Never raises: a check that runs on a timer must not turn a lost internet
+    connection into an error someone has to dismiss. A failed look keeps the
+    last answer and says what went wrong alongside it, so the interface can
+    show a version it still believes in and stay quiet about the rest.
+    """
+    moment = time.time() if now is None else now
+    with LOCK:
+        fresh = LATEST["value"] is not None and moment - LATEST["at"] < LATEST_TTL
+        if fresh:
+            return {"latest": LATEST["value"], "checked_at": LATEST["at"], "error": ""}
+    settings = options()
+    repository = str(settings.get("repository") or "hestiaworks/nspanel-companion-app")
+    channel = str(settings.get("channel") or "stable")
+    code, stdout, stderr = run_tool(
+        ["latest", "--repository", repository, "--channel", channel], 60,
+    )
+    if code:
+        with LOCK:
+            LATEST["error"] = stderr or stdout or "Could not reach GitHub"
+            return {"latest": LATEST["value"], "checked_at": LATEST["at"], "error": LATEST["error"]}
+    try:
+        value = json.loads(stdout)
+    except json.JSONDecodeError:
+        with LOCK:
+            LATEST["error"] = "Release metadata could not be read"
+            return {"latest": LATEST["value"], "checked_at": LATEST["at"], "error": LATEST["error"]}
+    with LOCK:
+        LATEST.update({"at": moment, "value": value, "error": ""})
+        return {"latest": value, "checked_at": moment, "error": ""}
+
+
 def run_tool(arguments: list[str], timeout: int) -> tuple[int, str, str]:
     result = subprocess.run(
         ["python3", TOOL, *arguments], text=True, capture_output=True,
@@ -128,6 +170,12 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(HTTPStatus.OK, {
                 "id": STATE["id"], "name": STATE["name"], "code": PAIR_CODE,
             })
+            return
+        if self.path == "/api/latest":
+            if not self.authorized():
+                self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "Unauthorized"})
+                return
+            self.send_json(HTTPStatus.OK, latest_release())
             return
         if self.path == "/api/status":
             self.send_json(HTTPStatus.OK, {

@@ -104,7 +104,12 @@ def fetch_json(url: str) -> object:
         return json.loads(response.read(256 * 1024))
 
 
-def release_apk(repository: str, channel: str) -> tuple[Path, dict]:
+def published_release(repository: str, channel: str) -> tuple[dict, dict]:
+    """The newest release on this channel, with its metadata already checked.
+
+    Everything here is about what is published; nothing is downloaded. An
+    install continues from this point, and a check stops here.
+    """
     releases = fetch_json(f"https://api.github.com/repos/{repository}/releases")
     release = next((item for item in releases if not item.get("draft") and (channel == "prerelease" or not item.get("prerelease"))), None)
     if not release:
@@ -127,6 +132,32 @@ def release_apk(repository: str, channel: str) -> tuple[Path, dict]:
     digest = str(metadata.get("sha256", ""))
     if not re.fullmatch(r"nspanel-companion-[A-Za-z0-9._-]+-arm64\.apk", name) or not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise RuntimeError("Release metadata is invalid")
+    return release, metadata
+
+
+def latest_release(repository: str, channel: str) -> dict:
+    """What is published, for a caller that only wants to know.
+
+    Deliberately small: a version to show, the code to compare against what
+    a panel has, and somewhere to read about it. The signing certificate is
+    checked here as it is for an install, so nothing can be announced that
+    would then be refused.
+    """
+    release, metadata = published_release(repository, channel)
+    return {
+        "version": str(metadata.get("version", "")),
+        "version_code": int(metadata.get("version_code", 0)),
+        "url": release.get("html_url", ""),
+        "published_at": release.get("published_at", ""),
+        "channel": channel,
+    }
+
+
+def release_apk(repository: str, channel: str) -> tuple[Path, dict]:
+    release, metadata = published_release(repository, channel)
+    assets = {item["name"]: item for item in release.get("assets", [])}
+    name = str(metadata["apk"])
+    digest = str(metadata["sha256"])
     asset = assets.get(name)
     if not asset:
         raise RuntimeError("Release APK is missing")
@@ -323,10 +354,15 @@ def main() -> int:
     relaunch = commands.add_parser("restart")
     relaunch.add_argument("address")
     relaunch.add_argument("--device", action="store_true")
+    newest = commands.add_parser("latest")
+    newest.add_argument("--repository", default="hestiaworks/nspanel-companion-app")
+    newest.add_argument("--channel", choices=["stable", "prerelease"], default="stable")
     args = parser.parse_args()
     try:
         if args.command == "discover":
             print(json.dumps(discover(args.subnet)))
+        elif args.command == "latest":
+            print(json.dumps(latest_release(args.repository, args.channel)))
         elif args.command == "restart":
             panel = inspect(args.address)
             if panel["adb_state"] != "device":

@@ -89,3 +89,63 @@ class SecureSettingsGrantTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class LatestReleaseTest(unittest.TestCase):
+    """What the newest release is, without fetching the APK to find out.
+
+    A check runs on a timer and only needs to know what is published. The
+    download, its digest and the signer check belong to an install, which
+    happens once and deliberately — asking GitHub for a hundred megabytes
+    every few hours to answer "is there anything new" would be absurd.
+    """
+
+    RELEASES = [
+        {"draft": True, "prerelease": False, "tag_name": "v9.9.9", "assets": []},
+        {"draft": False, "prerelease": True, "tag_name": "v1.3.0-rc.1", "html_url": "u/rc",
+         "published_at": "2026-09-10T00:00:00Z", "assets": [
+             {"name": "release.json", "browser_download_url": "meta/rc"}]},
+        {"draft": False, "prerelease": False, "tag_name": "v1.2.2", "html_url": "u/stable",
+         "published_at": "2026-09-07T00:00:00Z", "assets": [
+             {"name": "release.json", "browser_download_url": "meta/stable"}]},
+    ]
+
+    def metadata(self, version: str, code: int) -> dict:
+        return {
+            "application_id": "dev.hacompanion.panel", "abi": "arm64-v8a",
+            "certificate_sha256": updater.PINNED_CERTIFICATE_SHA256,
+            "apk": f"nspanel-companion-{version}-arm64.apk", "sha256": "a" * 64,
+            "version": version, "version_code": code,
+        }
+
+    def fetch(self, url: str):
+        if url.endswith("/releases"):
+            return self.RELEASES
+        return self.metadata("1.3.0-rc.1", 1030061) if url == "meta/rc" \
+            else self.metadata("1.2.2", 1020299)
+
+    def test_the_stable_channel_skips_a_prerelease(self):
+        with patch.object(updater, "fetch_json", self.fetch):
+            latest = updater.latest_release("owner/repo", "stable")
+        self.assertEqual("1.2.2", latest["version"])
+        self.assertEqual(1020299, latest["version_code"])
+        self.assertEqual("u/stable", latest["url"])
+
+    def test_the_prerelease_channel_takes_whatever_is_newest(self):
+        with patch.object(updater, "fetch_json", self.fetch):
+            latest = updater.latest_release("owner/repo", "prerelease")
+        self.assertEqual("1.3.0-rc.1", latest["version"])
+
+    def test_a_draft_is_never_offered(self):
+        with patch.object(updater, "fetch_json", self.fetch):
+            for channel in ("stable", "prerelease"):
+                self.assertNotEqual("9.9.9", updater.latest_release("owner/repo", channel)["version"])
+
+    def test_a_release_signed_by_someone_else_is_refused(self):
+        def fetch(url: str):
+            if url.endswith("/releases"):
+                return self.RELEASES
+            return {**self.metadata("1.2.2", 1020299), "certificate_sha256": "b" * 64}
+        with patch.object(updater, "fetch_json", fetch):
+            with self.assertRaises(RuntimeError):
+                updater.latest_release("owner/repo", "stable")
