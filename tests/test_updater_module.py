@@ -149,3 +149,69 @@ class LatestReleaseTest(unittest.TestCase):
         with patch.object(updater, "fetch_json", fetch):
             with self.assertRaises(RuntimeError):
                 updater.latest_release("owner/repo", "stable")
+
+
+class DiscoveryReachTest(unittest.TestCase):
+    """Which devices discovery is willing to touch.
+
+    A scan used to run `adb connect` against everything with 5555 open, and
+    `adb connect` is what raises "Allow USB debugging?" on the device. A
+    television left in developer mode was therefore asked for permission
+    every time someone looked for panels — and the answer that it is not a
+    panel only arrived after the asking.
+
+    Nothing may be contacted over ADB unless it has already been identified
+    without it. Two signals do that: the hardware address, which is burned
+    in and present before the panel has any software on it at all, and an
+    ADB banner that comes back already authorised, which cannot prompt
+    because the key is known.
+    """
+
+    def test_panel_hardware_is_recognised_by_its_mac_prefix(self):
+        self.assertTrue(updater.is_panel_hardware("88:12:ac:b6:27:9f"))
+        self.assertTrue(updater.is_panel_hardware("88:12:AC:CF:B4:19"))
+
+    def test_other_hardware_is_not(self):
+        self.assertFalse(updater.is_panel_hardware("14:3f:a6:96:e7:8b"))
+        self.assertFalse(updater.is_panel_hardware(""))
+        self.assertFalse(updater.is_panel_hardware(None))
+
+    def test_a_panel_is_reachable_by_its_mac_even_when_it_has_never_been_paired(self):
+        """A factory-fresh panel has no app, no authorisation and nothing to say.
+
+        It is still a panel, and prompting it is the point of the exercise.
+        """
+        self.assertTrue(updater.may_contact("88:12:ac:00:00:01", "AUTH"))
+
+    def test_an_already_authorised_device_is_reachable_whatever_it_is(self):
+        """A CNXN reply means our key is known, so connecting cannot prompt."""
+        self.assertTrue(updater.may_contact("14:3f:a6:96:e7:8b", "CNXN"))
+
+    def test_an_unauthorised_stranger_is_left_alone(self):
+        """The television. Asking it anything is the bug."""
+        self.assertFalse(updater.may_contact("14:3f:a6:96:e7:8b", "AUTH"))
+        self.assertFalse(updater.may_contact(None, "AUTH"))
+
+    def test_discovery_inspects_only_what_it_may_contact(self):
+        seen = []
+
+        def fake_inspect(address):
+            seen.append(address)
+            # inspect() reports the adb serial, as the real one does.
+            return {"address": f"{address}:5555", "classification": "nspanel-companion"}
+
+        with patch.object(updater, "open_port", lambda address: address in {"192.0.2.6", "192.0.2.221"}), \
+             patch.object(updater, "mac_address", lambda address: {
+                 "192.0.2.6": "88:12:ac:b6:27:9f", "192.0.2.221": "14:3f:a6:96:e7:8b",
+             }.get(address)), \
+             patch.object(updater, "adb_banner", lambda address: ("AUTH", "")), \
+             patch.object(updater, "inspect", fake_inspect):
+            devices = updater.discover("192.0.2.0/24")
+
+        self.assertEqual(["192.0.2.6"], seen)
+        addresses = {device["address"]: device for device in devices}
+        self.assertIn("192.0.2.221:5555", addresses)
+        self.assertEqual("not-contacted", addresses["192.0.2.221:5555"]["classification"])
+        self.assertEqual("14:3f:a6:96:e7:8b", addresses["192.0.2.221:5555"]["mac"])
+        self.assertEqual("88:12:ac:b6:27:9f", addresses["192.0.2.6:5555"]["mac"])
+
