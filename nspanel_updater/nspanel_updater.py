@@ -20,6 +20,11 @@ from urllib.request import Request, urlopen
 PACKAGE = "dev.hacompanion.panel"
 SECURE_SETTINGS_PERMISSION = "android.permission.WRITE_SECURE_SETTINGS"
 PINNED_CERTIFICATE_SHA256 = "3567e430a196e39a4b21045757c98d83756569777cff2bb3d2835fa6e813e5e7"
+# The manufacturer prefix every panel's network interface carries. Burned in,
+# so it is readable before the panel has any software on it and long before
+# anyone has authorised anything.
+PANEL_OUIS = ("88:12:ac",)
+import struct  # noqa: E402  (kept beside the ADB banner probe it exists for)
 
 
 def run(args: list[str], timeout: int = 10) -> subprocess.CompletedProcess[str]:
@@ -87,6 +92,77 @@ def inspect(address: str) -> dict:
     }
 
 
+
+def is_panel_hardware(mac: str | None) -> bool:
+    """Whether this hardware address belongs to a panel."""
+    return bool(mac) and mac.lower().replace("-", ":").startswith(PANEL_OUIS)
+
+
+def mac_address(address: str) -> str | None:
+    """The hardware address of a neighbour, from the kernel's ARP table.
+
+    Populated by the port scan that has just run, so nothing extra is sent.
+    Absent if the device is not on this segment, which is answer enough.
+    """
+    host = address.split(":")[0]
+    try:
+        for line in Path("/proc/net/arp").read_text().splitlines()[1:]:
+            fields = line.split()
+            if len(fields) >= 4 and fields[0] == host and fields[3] != "00:00:00:00:00:00":
+                return fields[3].lower()
+    except OSError:
+        pass
+    result = run(["arp", "-n", host], 5)
+    found = re.search(r"([0-9a-f]{1,2}(?::[0-9a-f]{1,2}){5})", result.stdout, re.I)
+    return found.group(1).lower() if found else None
+
+
+def adb_banner(address: str) -> tuple[str, str]:
+    """The first thing an ADB daemon says, without offering it a key.
+
+    ADB's permission dialog appears when a host presents a key the device
+    does not know. This gets as far as the device's first reply and stops:
+    CNXN means our key is already trusted and its banner names the hardware,
+    AUTH means it wants a key we deliberately never send. Neither prompts.
+    """
+    host = address.split(":")[0]
+    def packet(command: bytes, arg0: int, arg1: int, payload: bytes) -> bytes:
+        return struct.pack(
+            "<6I", int.from_bytes(command, "little"), arg0, arg1,
+            len(payload), sum(payload) & 0xFFFFFFFF,
+            int.from_bytes(command, "little") ^ 0xFFFFFFFF,
+        ) + payload
+    try:
+        with socket.create_connection((host, 5555), timeout=4) as stream:
+            stream.settimeout(4)
+            stream.sendall(packet(b"CNXN", 0x01000000, 256 * 1024, b"host::features=cmd,shell_v2\x00"))
+            header = stream.recv(24)
+            if len(header) < 24:
+                return "", ""
+            command, _, _, length, _, _ = struct.unpack("<6I", header)
+            body = b""
+            while len(body) < length:
+                chunk = stream.recv(min(4096, length - len(body)))
+                if not chunk:
+                    break
+                body += chunk
+    except OSError:
+        return "", ""
+    return command.to_bytes(4, "little").decode("ascii", "replace"), body.decode("utf-8", "replace")
+
+
+def may_contact(mac: str | None, banner: str) -> bool:
+    """Whether running adb against this device is allowed to prompt it.
+
+    Panels may be prompted — that is how one is adopted, and the dialog
+    appears on the panel in front of whoever asked for it. Everything else
+    must have authorised us already, which is exactly what a CNXN reply
+    proves. A television in developer mode satisfies neither and is left
+    alone: it was never going to be a panel, and asking it was the bug.
+    """
+    return is_panel_hardware(mac) or banner == "CNXN"
+
+
 def discover(subnet: str) -> list[dict]:
     network = private_subnet(subnet)
     with concurrent.futures.ThreadPoolExecutor(max_workers=64) as pool:
@@ -94,8 +170,29 @@ def discover(subnet: str) -> list[dict]:
             (str(item) for item in network.hosts()),
             pool.map(open_port, (str(item) for item in network.hosts())),
         ) if found]
+    with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
+        macs = list(pool.map(mac_address, addresses))
+        banners = list(pool.map(lambda item: adb_banner(item)[0], addresses))
+    reachable = [
+        address for address, mac, banner in zip(addresses, macs, banners)
+        if may_contact(mac, banner)
+    ]
     with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
-        return list(pool.map(inspect, addresses))
+        inspected = {
+            device["address"].split(":")[0]: device
+            for device in pool.map(inspect, reachable)
+        }
+    devices = []
+    for address, mac in zip(addresses, macs):
+        device = inspected.get(address)
+        if device is None:
+            # Listed rather than hidden: a device nobody can account for is
+            # worth seeing, and seeing it is not the same as touching it.
+            device = {"address": f"{address}:5555", "adb_state": "not-contacted",
+                      "classification": "not-contacted"}
+        device["mac"] = mac
+        devices.append(device)
+    return devices
 
 
 def fetch_json(url: str) -> object:
