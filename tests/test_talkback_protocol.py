@@ -296,3 +296,71 @@ class LeadingSilence(unittest.TestCase):
         quiet = [40 if i % 2 else -40 for i in range(1025)]
         cam, _ = self._stream([quiet])
         self.assertEqual(1, cam.sent)
+
+
+class WarmConnection(unittest.TestCase):
+    """The camera connection is kept open between talks.
+
+    Connecting, logging in and asking the camera what it accepts is three
+    round trips. Per request that is invisible on a camera page, where the
+    button is pressed seconds after the page opens — and plainly audible on
+    a ring, where it is pressed the instant the screen appears and the first
+    words go in while the add-on is still introducing itself.
+    """
+
+    def holder(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "nspanel_talkback"))
+        import server
+        return server
+
+    def test_a_reused_connection_does_not_log_in_again(self):
+        server = self.holder()
+        opened = []
+
+        class FakeCamera:
+            talking = False
+            def close(self): pass
+
+        holder = server.CameraHolder.__new__(server.CameraHolder)
+        holder._camera = None
+        holder._ability = None
+        import threading
+        holder._lock = threading.Lock()
+        holder._open = lambda: (opened.append(1), FakeCamera())[1]
+        server.check_ability = lambda _cam: {"audio_type": "adpcm"}
+
+        holder.borrow()
+        holder.borrow()
+        holder.borrow()
+        self.assertEqual(1, len(opened), "logged in more than once for three talks")
+
+    def test_a_stale_connection_is_replaced_rather_than_surfaced(self):
+        server = self.holder()
+        opened = []
+
+        class Stale:
+            talking = False
+            def close(self): pass
+
+        class Fresh:
+            talking = False
+            def close(self): pass
+
+        holder = server.CameraHolder.__new__(server.CameraHolder)
+        holder._camera = Stale()
+        holder._ability = None
+        import threading
+        holder._lock = threading.Lock()
+        holder._open = lambda: (opened.append(1), Fresh())[1]
+
+        calls = {"n": 0}
+        def ability(cam):
+            calls["n"] += 1
+            if isinstance(cam, Stale):
+                raise ConnectionError("socket went away while idle")
+            return {"audio_type": "adpcm"}
+        server.check_ability = ability
+
+        cam, _ = holder.borrow()
+        self.assertIsInstance(cam, Fresh, "a stale connection was handed out")
+        self.assertEqual(1, len(opened))

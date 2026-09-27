@@ -18,6 +18,7 @@ from baichuan import (
 LOG = logging.getLogger("talkback.client")
 
 CH_HOST = 250          # 0/251 push, 1-100 a channel, 250 the host itself
+CMD_KEEPALIVE = 93     # reolink_aio uses LinkType for this
 CONNECT_TIMEOUT = 10
 REPLY_TIMEOUT = 10
 
@@ -220,6 +221,15 @@ class Camera:
         )
         self._request(CMD_LOGIN, body=login_xml, encrypt="xor", ch_id=CH_HOST)
         LOG.info("logged in to %s", self.host)
+
+    def keepalive(self) -> None:
+        """Keep the connection warm between talks.
+
+        A socket the camera has quietly dropped does not fail on the next
+        send — it times out, ten seconds later, which is worse than having
+        reconnected in the first place.
+        """
+        self._request(CMD_KEEPALIVE)
 
     def talk_ability(self) -> dict:
         """What the camera says it accepts — the firmware-drift canary."""

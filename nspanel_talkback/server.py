@@ -88,6 +88,86 @@ def is_loopback(address: str) -> bool:
     return address in ("127.0.0.1", "::1", "::ffff:127.0.0.1")
 
 
+class CameraHolder:
+    """One Baichuan connection, kept open between talks.
+
+    Connecting, logging in and asking the camera what it accepts is three
+    round trips. Doing them per request is invisible on a camera page, where
+    someone opens the page and presses the button seconds later — and plainly
+    audible on a ring, where the button is pressed the instant the screen
+    appears and the first words go in while the add-on is still introducing
+    itself.
+
+    A connection that has gone stale surfaces as a failure on first use, so
+    every borrow retries once on a fresh one before giving up.
+    """
+
+    #: Comfortably inside any idle timeout the camera is likely to apply.
+    KEEPALIVE_SECONDS = 20
+
+    def __init__(self) -> None:
+        self._camera: Camera | None = None
+        self._ability: dict | None = None
+        self._lock = threading.Lock()
+        threading.Thread(target=self._keep_warm, name="camera-keepalive",
+                         daemon=True).start()
+
+    def _keep_warm(self) -> None:
+        while True:
+            time.sleep(self.KEEPALIVE_SECONDS)
+            with self._lock:
+                camera = self._camera
+                if camera is None or camera.talking:
+                    continue
+            try:
+                camera.keepalive()
+            except Exception:  # noqa: BLE001 - it had already gone
+                LOG.info("camera connection lapsed; it will reopen on the next talk")
+                self.drop()
+
+    def _open(self) -> Camera:
+        camera = camera_from_options()
+        camera.connect()
+        camera.login()
+        return camera
+
+    def drop(self) -> None:
+        with self._lock:
+            camera, self._camera = self._camera, None
+            self._ability = None
+        if camera is not None:
+            try:
+                camera.close()
+            except Exception:  # noqa: BLE001 - it is going away regardless
+                pass
+
+    def borrow(self) -> "tuple[Camera, dict]":
+        """A live connection and what the camera accepts, reconnecting if need be."""
+        with self._lock:
+            for attempt in (1, 2):
+                try:
+                    if self._camera is None:
+                        self._camera = self._open()
+                        self._ability = None
+                    if self._ability is None:
+                        self._ability = check_ability(self._camera)
+                    return self._camera, self._ability
+                except Exception:  # noqa: BLE001 - a stale socket looks like anything
+                    camera, self._camera, self._ability = self._camera, None, None
+                    if camera is not None:
+                        try:
+                            camera.close()
+                        except Exception:  # noqa: BLE001
+                            pass
+                    if attempt == 2:
+                        raise
+                    LOG.info("camera connection was stale; opening a new one")
+            raise RuntimeError("unreachable")
+
+
+CAMERA = CameraHolder()
+
+
 def camera_from_options() -> Camera:
     options = load_options()
     host = str(options.get("camera_host", "")).strip()
@@ -288,9 +368,14 @@ class Handler(BaseHTTPRequestHandler):
                            {"error": "This add-on is already talking"})
             return
         try:
-            with camera_from_options() as cam:
-                ability = check_ability(cam)
+            cam, ability = CAMERA.borrow()
+            try:
                 result = produce(cam, ability)
+            finally:
+                # The talk channel is released, the connection is not: the
+                # next press should find it already open.
+                if cam.talking:
+                    cam.stop_talk()
             self.send_json(HTTPStatus.OK, {"ok": True, **result})
         except BaichuanError as err:
             if err.busy:
@@ -303,6 +388,7 @@ class Handler(BaseHTTPRequestHandler):
                                {"error": f"Camera refused: status {err.status}"})
         except (RuntimeError, ConnectionError, OSError, TimeoutError) as err:
             LOG.warning("talk failed: %s", err)
+            CAMERA.drop()
             self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(err)})
         finally:
             TALK_LOCK.release()
@@ -338,10 +424,11 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "Invalid credential"})
                 return
             try:
-                with camera_from_options() as cam:
-                    self.send_json(HTTPStatus.OK, check_ability(cam))
+                _cam, ability = CAMERA.borrow()
+                self.send_json(HTTPStatus.OK, ability)
             except (RuntimeError, ConnectionError, OSError, TimeoutError,
                     BaichuanError) as err:
+                CAMERA.drop()
                 self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(err)})
             return
 
