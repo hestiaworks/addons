@@ -1,0 +1,30 @@
+name: "NSPanel Companion Talkback"
+description: "Low-latency two-way audio to a Reolink doorbell over Baichuan"
+version: "0.1.0"
+slug: "nspanel_companion_talkback"
+init: false
+arch:
+  - aarch64
+  - amd64
+startup: services
+boot: auto
+host_network: true
+ports:
+  8099/tcp: 8099
+ports_description:
+  8099/tcp: "Local talkback API"
+options:
+  camera_host: ""
+  camera_username: ""
+  camera_password: ""
+  camera_port: 9000
+  camera_channel: 0
+schema:
+  camera_host: str
+  # A limited camera user is enough — talk does not need admin, and this
+  # credential reaches an add-on rather than staying on the camera.
+  camera_username: str
+  camera_password: password
+  camera_port: port
+  camera_channel: int(0,15)
+stage: experimental

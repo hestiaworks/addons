@@ -1,0 +1,167 @@
+"""Baichuan framing, encryption and the talk messages.
+
+Everything here is pure, so it runs without a camera and without
+`cryptography` — the AES primitive is imported lazily for exactly that
+reason, and is the one thing these tests do not cover.
+"""
+
+import struct
+import sys
+import unittest
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "nspanel_talkback"))
+
+import baichuan as bc
+
+
+class Hashing(unittest.TestCase):
+    def test_md5_is_truncated_to_31_and_upper_cased(self):
+        # Not a typo in the firmware's favour: a full 32-character hash
+        # fails the login outright.
+        digest = bc.md5_hash("anything")
+        self.assertEqual(len(digest), 31)
+        self.assertEqual(digest, digest.upper())
+
+
+class XorObfuscation(unittest.TestCase):
+    def test_round_trips(self):
+        self.assertEqual(bc.xor_crypt(bc.xor_crypt(b"<?xml ...", 250), 250), b"<?xml ...")
+
+    def test_offset_changes_the_output(self):
+        self.assertNotEqual(bc.xor_crypt(b"abc", 1), bc.xor_crypt(b"abc", 2))
+
+    def test_offset_must_fit_a_byte(self):
+        with self.assertRaises(ValueError):
+            bc.xor_crypt(b"abc", 256)
+
+
+class Headers(unittest.TestCase):
+    def test_normal_class_carries_a_payload_offset(self):
+        head = bc.build_header(bc.CMD_TALK, 100, 1, 7, bc.CLASS_NORMAL, 60)
+        self.assertEqual(len(head), 24)
+        message = bc.parse_header(head)
+        self.assertEqual(message.cmd_id, bc.CMD_TALK)
+        self.assertEqual(message.length, 100)
+        self.assertEqual(message.ch_id, 1)
+        self.assertEqual(message.payload_offset, 60)
+
+    def test_login_class_has_no_payload_offset(self):
+        head = bc.build_header(bc.CMD_LOGIN, 0, 250, 1, bc.CLASS_LOGIN)
+        self.assertEqual(len(head), 20)
+        self.assertEqual(bc.header_length(head), 20)
+
+    def test_the_camera_replies_in_class_1466_with_a_short_header(self):
+        """Regression: a real nonce reply, captured from a D340P.
+
+        Treating 1466 as a 24-byte header eats four bytes of the body and
+        every decryption after it is garbage. The reply is 178 bytes with a
+        declared length of 158, which only adds up at 20.
+        """
+        head = bytes.fromhex("f0debc0a010000009e000000fa01000012dd1466")
+        self.assertEqual(bc.header_length(head), 20)
+        message = bc.parse_header(head)
+        self.assertEqual(message.cmd_id, bc.CMD_LOGIN)
+        self.assertEqual(message.length, 158)
+        self.assertEqual(message.ch_id, 250)
+        self.assertEqual(message.enc_type, "12dd")
+        self.assertIn(message.enc_type, bc.ENC_XOR)
+
+    def test_a_short_header_carries_no_status(self):
+        # Those two bytes are the encryption type. Read as a status they
+        # say 56594, and every reply looks like a failure.
+        head = bytes.fromhex("f0debc0a010000009e000000fa01000012dd1466")
+        message = bc.parse_header(head)
+        self.assertIsNone(message.status)
+        self.assertTrue(message.ok)
+
+    def test_status_is_read_only_from_a_long_header(self):
+        head = bc.build_header(bc.CMD_TALK_CONFIG, 0, 1, 1, bc.CLASS_NORMAL)
+        self.assertEqual(bc.parse_header(head).status, 0)
+
+    def test_busy_status_is_recognised(self):
+        error = bc.BaichuanError(bc.CMD_TALK_CONFIG, bc.STATUS_BUSY)
+        self.assertTrue(error.busy)
+        self.assertFalse(bc.BaichuanError(bc.CMD_TALK_CONFIG, 400).busy)
+
+    def test_rejects_something_that_is_not_a_header(self):
+        with self.assertRaises(ValueError):
+            bc.parse_header(b"not a baichuan message at all")
+
+
+class BcMediaRecord(unittest.TestCase):
+    def test_header_fields_match_the_block(self):
+        block = bytes(516)                      # 4 predictor + 512 codes
+        record = bc.bcmedia_adpcm(block)
+        magic, size_a, size_b, data_magic, halved = struct.unpack("<IHHHH", record[:12])
+        self.assertEqual(magic, 0x62773130)     # "01wb"
+        self.assertEqual(size_a, len(block) + 4)
+        self.assertEqual(size_b, size_a, "the firmware wants the size twice")
+        self.assertEqual(data_magic, 0x0100)
+        self.assertEqual(halved, (len(block) - 4) // 2)
+
+    def test_the_block_is_padded_to_an_eight_byte_boundary(self):
+        # The padding applies to the block, not to the whole record: the
+        # 12-byte header sits in front of it and is not counted.
+        for block_size in (516, 520, 517):
+            record = bc.bcmedia_adpcm(bytes(block_size))
+            self.assertEqual((len(record) - 12) % 8, 0,
+                             f"block of {block_size} was not padded to 8")
+        self.assertEqual(len(bc.bcmedia_adpcm(bytes(516))), 12 + 520)
+
+    def test_the_block_survives_verbatim(self):
+        block = bytes(range(256)) * 2 + bytes(4)
+        record = bc.bcmedia_adpcm(block)
+        self.assertEqual(record[12:12 + len(block)], block)
+
+
+class TalkAbility(unittest.TestCase):
+    REPLY = """<?xml version="1.0" encoding="UTF-8" ?>
+<body>
+<TalkAbility version="1.1">
+<duplexList><duplex>FDX</duplex></duplexList>
+<audioStreamModeList>
+<audioStreamMode>followVideoStream</audioStreamMode>
+<audioStreamMode>mixAudioStream</audioStreamMode>
+</audioStreamModeList>
+<audioConfigList><audioConfig>
+<priority>0</priority>
+<audioType>adpcm</audioType>
+<sampleRate>16000</sampleRate>
+<samplePrecision>16</samplePrecision>
+<lengthPerEncoder>1024</lengthPerEncoder>
+<soundTrack>mono</soundTrack>
+</audioConfig></audioConfigList>
+</TalkAbility>
+</body>
+"""
+
+    def test_reads_what_the_camera_accepts(self):
+        ability = bc.parse_talk_ability(self.REPLY)
+        self.assertEqual(ability["audio_type"], "adpcm")
+        self.assertEqual(ability["sample_rate"], 16000)
+        self.assertEqual(ability["length_per_encoder"], 1024)
+        self.assertEqual(ability["sound_track"], "mono")
+        self.assertIn("FDX", ability["duplex"])
+        self.assertIn("mixAudioStream", ability["audio_stream_modes"])
+
+    def test_refuses_a_reply_with_no_audio_config(self):
+        with self.assertRaises(ValueError):
+            bc.parse_talk_ability("<?xml version='1.0'?><body><TalkAbility/></body>")
+
+
+class TalkConfig(unittest.TestCase):
+    def test_carries_the_negotiated_numbers(self):
+        xml = bc.talk_config_xml(0, 16000, 1024)
+        self.assertIn("<sampleRate>16000</sampleRate>", xml)
+        self.assertIn("<lengthPerEncoder>1024</lengthPerEncoder>", xml)
+        self.assertIn("<audioType>adpcm</audioType>", xml)
+        self.assertIn("<duplex>FDX</duplex>", xml)
+
+    def test_binary_extension_declares_a_binary_payload(self):
+        # Without this the camera reads the audio as XML and rejects it.
+        self.assertIn("<binaryData>1</binaryData>", bc.binary_extension_xml(0))
+
+
+if __name__ == "__main__":
+    unittest.main()
