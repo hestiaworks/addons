@@ -393,9 +393,17 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 result = produce(cam, ability, claim)
             finally:
-                # The talk channel is released, the connection is not: the
-                # next press should find it already open.
-                if cam.talking:
+                # Only the request that claimed the channel may release it.
+                #
+                # One connection is shared by every request now, and a panel
+                # keeps a silent request open whenever a camera page is on
+                # screen, rotating it every twenty seconds. Releasing on the
+                # way out regardless meant that idle rotation tore down
+                # somebody else's live talk, mid-sentence, on a timer.
+                #
+                # The connection itself stays open either way: the next press
+                # should still find it ready.
+                if held and cam.talking:
                     cam.stop_talk()
             self.send_json(HTTPStatus.OK, {"ok": True, **result})
         except BaichuanError as err:

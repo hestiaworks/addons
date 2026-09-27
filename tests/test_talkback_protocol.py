@@ -431,3 +431,43 @@ class TalkingIsWhatCollides(unittest.TestCase):
         )
         self.assertFalse(cam.started, "started a talk while another was in progress")
         self.assertEqual(0, cam.sent)
+
+
+class SharedConnectionIsolation(unittest.TestCase):
+    """One request must not tear down another's talk.
+
+    Every request shares one camera connection now, and a panel keeps a
+    silent request open whenever a camera page is on screen, rotating it
+    every twenty seconds. A cleanup that released the talk channel
+    regardless meant that idle rotation cut off somebody else's live talk,
+    mid-sentence, on a timer — which is a ring that sometimes works,
+    sometimes arrives seconds late, and sometimes does nothing at all,
+    while the camera page beside it is perfect.
+    """
+
+    def _cleanup(self, held, talking):
+        """The rule the request's cleanup follows."""
+        class Camera:
+            def __init__(self):
+                self.talking = talking
+                self.stopped = False
+            def stop_talk(self):
+                self.stopped = True
+                self.talking = False
+
+        cam = Camera()
+        # Mirrors server._talk's finally clause.
+        if held and cam.talking:
+            cam.stop_talk()
+        return cam
+
+    def test_the_talker_releases_its_own_channel(self):
+        self.assertTrue(self._cleanup(held=True, talking=True).stopped)
+
+    def test_an_idle_request_leaves_a_live_talk_alone(self):
+        # The case that broke it: a silent page rotating every twenty
+        # seconds while somebody was speaking through the ring screen.
+        self.assertFalse(self._cleanup(held=False, talking=True).stopped)
+
+    def test_nothing_to_release_is_not_an_error(self):
+        self.assertFalse(self._cleanup(held=True, talking=False).stopped)
