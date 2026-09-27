@@ -165,3 +165,52 @@ class TalkConfig(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class BodyReading(unittest.TestCase):
+    """Reading a request body that ends, on a connection that does not.
+
+    A panel streams with no Content-Length, so the body is chunked — which
+    `BaseHTTPRequestHandler` does not decode — and on a keep-alive socket a
+    plain read blocks for the next request instead of returning short.
+    """
+
+    def _reader(self, raw, headers):
+        import io
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "nspanel_talkback"))
+        import server
+        return server.BodyReader(io.BytesIO(raw), headers)
+
+    def test_reads_a_body_with_a_content_length(self):
+        reader = self._reader(b"abcdefghij", {"Content-Length": "10"})
+        self.assertEqual(reader.read_exactly(4), b"abcd")
+        self.assertEqual(reader.read_exactly(4), b"efgh")
+
+    def test_stops_at_the_end_rather_than_blocking(self):
+        reader = self._reader(b"abcdefghij", {"Content-Length": "10"})
+        reader.read_exactly(10)
+        self.assertEqual(reader.read_exactly(4), b"")
+
+    def test_returns_short_on_a_partial_final_block(self):
+        reader = self._reader(b"abcdefghij", {"Content-Length": "10"})
+        reader.read_exactly(8)
+        self.assertEqual(reader.read_exactly(4), b"ij")
+
+    def test_decodes_a_chunked_body(self):
+        raw = b"5\r\nhello\r\n5\r\nworld\r\n0\r\n\r\n"
+        reader = self._reader(raw, {"Transfer-Encoding": "chunked"})
+        self.assertEqual(reader.read_exactly(10), b"helloworld")
+        self.assertEqual(reader.read_exactly(1), b"")
+
+    def test_reassembles_across_chunk_boundaries(self):
+        # A 20 ms audio block will not line up with the chunks it arrives in.
+        raw = b"3\r\nabc\r\n3\r\ndef\r\n3\r\nghi\r\n0\r\n\r\n"
+        reader = self._reader(raw, {"Transfer-Encoding": "chunked"})
+        self.assertEqual(reader.read_exactly(4), b"abcd")
+        self.assertEqual(reader.read_exactly(4), b"efgh")
+        self.assertEqual(reader.read_exactly(4), b"i")
+
+    def test_a_truncated_chunked_body_ends_rather_than_hangs(self):
+        reader = self._reader(b"5\r\nhel", {"Transfer-Encoding": "chunked"})
+        self.assertEqual(reader.read_exactly(10), b"hel")
+        self.assertEqual(reader.read_exactly(1), b"")

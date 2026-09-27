@@ -146,6 +146,67 @@ def two_tone(ability: dict, seconds: float):
         yield block
 
 
+class BodyReader:
+    """Reads a request body that may be chunked, and stops at its end.
+
+    Two reasons this cannot be `rfile.read`. A panel streams with no
+    Content-Length, so the body arrives chunked and `BaseHTTPRequestHandler`
+    does not decode that. And on a keep-alive connection a plain read blocks
+    waiting for the *next* request rather than returning short, so a talk
+    that had ended would never be noticed.
+    """
+
+    def __init__(self, rfile, headers) -> None:
+        self._rfile = rfile
+        self._chunked = "chunked" in headers.get("Transfer-Encoding", "").lower()
+        self._remaining = None if self._chunked else int(headers.get("Content-Length") or 0)
+        self._buffer = b""
+        self._ended = False
+
+    def _fill(self) -> None:
+        if self._ended:
+            return
+        try:
+            if self._chunked:
+                line = self._rfile.readline().strip()
+                if not line:
+                    self._ended = True
+                    return
+                size = int(line.split(b";")[0], 16)
+                if size == 0:
+                    self._rfile.readline()          # the trailing blank line
+                    self._ended = True
+                    return
+                chunk = b""
+                while len(chunk) < size:
+                    part = self._rfile.read(size - len(chunk))
+                    if not part:
+                        self._ended = True
+                        break
+                    chunk += part
+                self._rfile.read(2)                 # CRLF after every chunk
+                self._buffer += chunk
+            else:
+                if not self._remaining:
+                    self._ended = True
+                    return
+                part = self._rfile.read(min(self._remaining, 65536))
+                if not part:
+                    self._ended = True
+                    return
+                self._remaining -= len(part)
+                self._buffer += part
+        except (OSError, ValueError):
+            self._ended = True
+
+    def read_exactly(self, count: int) -> bytes:
+        """Up to `count` bytes, returning short only at the end of the body."""
+        while len(self._buffer) < count and not self._ended:
+            self._fill()
+        out, self._buffer = self._buffer[:count], self._buffer[count:]
+        return out
+
+
 class Handler(BaseHTTPRequestHandler):
     server_version = f"NSPanelTalkback/{VERSION}"
 
@@ -258,8 +319,10 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         if self.path == "/api/talk":
+            reader = self._body_reader()
+
             def produce(cam, ability):
-                return stream_pcm(cam, self._read_exactly, ability)
+                return stream_pcm(cam, reader.read_exactly, ability)
             self._talk(produce)
             return
 
@@ -281,18 +344,8 @@ class Handler(BaseHTTPRequestHandler):
 
         self.send_json(HTTPStatus.NOT_FOUND, {"error": "No such endpoint"})
 
-    def _read_exactly(self, count: int) -> bytes:
-        """A chunked request body arrives in whatever sizes it likes."""
-        out = b""
-        while len(out) < count:
-            try:
-                part = self.rfile.read(count - len(out))
-            except (OSError, ValueError):
-                return out
-            if not part:
-                return out
-            out += part
-        return out
+    def _body_reader(self) -> "BodyReader":
+        return BodyReader(self.rfile, self.headers)
 
 
 def main() -> None:
