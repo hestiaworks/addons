@@ -214,3 +214,85 @@ class BodyReading(unittest.TestCase):
         reader = self._reader(b"5\r\nhel", {"Transfer-Encoding": "chunked"})
         self.assertEqual(reader.read_exactly(10), b"hel")
         self.assertEqual(reader.read_exactly(1), b"")
+
+
+class LeadingSilence(unittest.TestCase):
+    """Silence that arrives before anyone speaks must never reach the camera.
+
+    A panel opens its talkback session when the camera page appears and fills
+    the wait with zero-filled frames. Forwarding those fills the camera's
+    playout buffer before the first word, and since it drains in real time
+    every word then arrives that far behind — measured at four to five
+    seconds, with the overflow clipping the end off the sentence.
+    """
+
+    def _stream(self, blocks):
+        import struct
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "nspanel_talkback"))
+        import server
+
+        ability = {"sample_rate": 16000, "length_per_encoder": 1024}
+        per = 1 + 512 * 2
+        body = b"".join(struct.pack(f"<{per}h", *b) for b in blocks)
+        pos = {"i": 0}
+
+        def read(count):
+            chunk = body[pos["i"]:pos["i"] + count]
+            pos["i"] += len(chunk)
+            return chunk
+
+        class FakeCamera:
+            def __init__(self):
+                self.started = False
+                self.sent = 0
+                self.start_order = None
+            def start_talk(self, *_a, **_k):
+                self.started = True
+                self.start_order = self.sent
+            def send_audio(self, _record):
+                self.sent += 1
+
+        cam = FakeCamera()
+        result = server.stream_pcm(cam, read, ability)
+        return cam, result
+
+    def _silence(self, per=1025):
+        return [0] * per
+
+    def _speech(self, per=1025):
+        return [12000 if i % 2 else -12000 for i in range(per)]
+
+    def test_silent_blocks_never_reach_the_camera(self):
+        cam, result = self._stream([self._silence()] * 20)
+        self.assertEqual(0, cam.sent)
+        self.assertEqual(20, result["dropped_silent_blocks"])
+
+    def test_the_talk_channel_is_not_claimed_for_silence(self):
+        # Holding it would refuse a phone or another panel with 422, for a
+        # silence nobody is listening to.
+        cam, _ = self._stream([self._silence()] * 20)
+        self.assertFalse(cam.started)
+
+    def test_speech_is_forwarded_from_its_first_block(self):
+        cam, result = self._stream([self._silence()] * 30 + [self._speech()] * 5)
+        self.assertEqual(5, cam.sent)
+        self.assertEqual(30, result["dropped_silent_blocks"])
+        self.assertTrue(cam.started)
+
+    def test_the_channel_is_claimed_exactly_when_speech_starts(self):
+        cam, _ = self._stream([self._silence()] * 30 + [self._speech()] * 5)
+        self.assertEqual(0, cam.start_order, "start_talk must precede the first block")
+
+    def test_pauses_inside_speech_are_kept(self):
+        # Dropping these would tighten the gaps out of a sentence.
+        blocks = [self._speech(), self._silence(), self._silence(), self._speech()]
+        cam, result = self._stream([self._silence()] * 10 + blocks)
+        self.assertEqual(4, cam.sent)
+        self.assertEqual(10, result["dropped_silent_blocks"])
+
+    def test_room_noise_counts_as_speech(self):
+        # The threshold is for digital zeros, not for a quiet room: a panel
+        # with an open microphone should still get through.
+        quiet = [40 if i % 2 else -40 for i in range(1025)]
+        cam, _ = self._stream([quiet])
+        self.assertEqual(1, cam.sent)

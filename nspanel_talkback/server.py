@@ -41,6 +41,18 @@ MAX_BODY = 16 * 1024
 # A talk that never ends would hold the channel against everyone else. The
 # camera frees it on disconnect anyway; this is the belt to that's braces.
 MAX_TALK_SECONDS = 300
+# Below this peak, a block is silence and the camera never sees it.
+#
+# A panel opens its talkback session as soon as the camera page appears and
+# fills the wait with zero-filled frames, so the first thing to arrive is
+# always silence - seconds of it. Forwarding that fills the camera's playout
+# buffer before anyone speaks, and since the buffer drains in real time, every
+# word then arrives that far behind. Measured at four to five seconds, with
+# the overflow clipping the end off what was said.
+#
+# Dropping it costs nothing: silence carries no information, and the panel's
+# is literal zeros rather than a quiet room.
+SILENCE_PEAK = 32
 
 STATE: dict = {"id": "", "name": "NSPanel Talkback", "token": ""}
 PAIR_CODE = f"{secrets.randbelow(1000000):06d}"
@@ -118,18 +130,50 @@ def stream_pcm(cam: Camera, read_chunk, ability: dict) -> dict:
     per_block = adpcm.samples_per_block(length_per_encoder)
     need = per_block * 2
 
-    cam.start_talk(ability["sample_rate"], length_per_encoder)
     encoder = adpcm.Encoder()
     blocks = 0
-    started = time.monotonic()
-    while time.monotonic() - started < MAX_TALK_SECONDS:
+    dropped = 0
+    talking = False
+    opened = time.monotonic()
+    started = None
+    while True:
+        if started is None:
+            if time.monotonic() - opened > MAX_TALK_SECONDS:
+                break
+        elif time.monotonic() - started > MAX_TALK_SECONDS:
+            break
         raw = read_chunk(need)
         if len(raw) < need:
             break
         samples = struct.unpack(f"<{per_block}h", raw)
+
+        if not talking:
+            if max(samples) < SILENCE_PEAK and min(samples) > -SILENCE_PEAK:
+                # Read it, drop it, and read the next. This drains whatever
+                # queued up before anyone spoke, at whatever speed it arrives,
+                # so the camera's buffer is empty when the first word reaches
+                # it.
+                dropped += 1
+                continue
+            # The talk channel is claimed here rather than when the request
+            # opened, so the camera is not holding it - against a phone, or
+            # another panel - through a silence nobody is listening to.
+            cam.start_talk(ability["sample_rate"], length_per_encoder)
+            talking = True
+            started = time.monotonic()
+
+        # Past the first word, silence is part of speech - the gap between
+        # words - and dropping it would tighten the pauses out of a sentence.
         cam.send_audio(bcmedia_adpcm(encoder.block(samples, n_code)))
         blocks += 1
-    return {"blocks": blocks, "seconds": round(blocks * per_block / ability["sample_rate"], 2)}
+
+    if not talking:
+        LOG.info("talk request carried no speech: %s silent blocks dropped", dropped)
+    return {
+        "blocks": blocks,
+        "seconds": round(blocks * per_block / ability["sample_rate"], 2),
+        "dropped_silent_blocks": dropped,
+    }
 
 
 def two_tone(ability: dict, seconds: float):
