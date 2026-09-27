@@ -253,7 +253,7 @@ class LeadingSilence(unittest.TestCase):
                 self.sent += 1
 
         cam = FakeCamera()
-        result = server.stream_pcm(cam, read, ability)
+        result = server.stream_pcm(cam, read, ability, claim=lambda: True)
         return cam, result
 
     def _silence(self, per=1025):
@@ -364,3 +364,70 @@ class WarmConnection(unittest.TestCase):
         cam, _ = holder.borrow()
         self.assertIsInstance(cam, Fresh, "a stale connection was handed out")
         self.assertEqual(1, len(opened))
+
+
+class TalkingIsWhatCollides(unittest.TestCase):
+    """Two pages open is not two people talking.
+
+    A panel opens its talkback request the moment a camera page appears and
+    keeps it open, silent, until somebody presses the button. Locking for
+    the length of the request therefore refused every other page and panel
+    while one of them merely had a camera on screen — and a panel refused
+    falls back to the slower path, which is a three second delay on a ring
+    while the camera page beside it was perfect.
+    """
+
+    def _stream(self, blocks, claim):
+        import struct
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "nspanel_talkback"))
+        import server
+
+        ability = {"sample_rate": 16000, "length_per_encoder": 1024}
+        per = 1 + 512 * 2
+        body = b"".join(struct.pack(f"<{per}h", *b) for b in blocks)
+        pos = {"i": 0}
+
+        def read(count):
+            chunk = body[pos["i"]:pos["i"] + count]
+            pos["i"] += len(chunk)
+            return chunk
+
+        class FakeCamera:
+            def __init__(self):
+                self.started = False
+                self.sent = 0
+            def start_talk(self, *_a, **_k):
+                self.started = True
+            def send_audio(self, _r):
+                self.sent += 1
+
+        cam = FakeCamera()
+        result = server.stream_pcm(cam, read, ability, claim=claim)
+        return cam, result
+
+    def silence(self):
+        return [0] * 1025
+
+    def speech(self):
+        return [12000 if i % 2 else -12000 for i in range(1025)]
+
+    def test_a_silent_request_never_claims_the_lock(self):
+        claims = []
+        self._stream([self.silence()] * 30, claim=lambda: (claims.append(1), True)[1])
+        self.assertEqual([], claims, "a page merely being open claimed the talk lock")
+
+    def test_the_lock_is_claimed_at_the_first_word(self):
+        claims = []
+        cam, _ = self._stream(
+            [self.silence()] * 10 + [self.speech()] * 3,
+            claim=lambda: (claims.append(1), True)[1],
+        )
+        self.assertEqual(1, len(claims))
+        self.assertTrue(cam.started)
+
+    def test_a_refused_claim_stops_rather_than_talking_over_someone(self):
+        cam, result = self._stream(
+            [self.silence()] * 5 + [self.speech()] * 10, claim=lambda: False,
+        )
+        self.assertFalse(cam.started, "started a talk while another was in progress")
+        self.assertEqual(0, cam.sent)

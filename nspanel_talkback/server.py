@@ -199,7 +199,7 @@ def check_ability(cam: Camera) -> dict:
     return ability
 
 
-def stream_pcm(cam: Camera, read_chunk, ability: dict) -> dict:
+def stream_pcm(cam: Camera, read_chunk, ability: dict, claim=None) -> dict:
     """Encode 16-bit PCM into ADPCM blocks and push them at the camera.
 
     The reader paces this: a panel sends in real time, so blocking until a
@@ -238,6 +238,15 @@ def stream_pcm(cam: Camera, read_chunk, ability: dict) -> dict:
             # The talk channel is claimed here rather than when the request
             # opened, so the camera is not holding it - against a phone, or
             # another panel - through a silence nobody is listening to.
+            #
+            # The add-on's own lock is taken at the same moment and for the
+            # same reason. A panel opens this POST as soon as a camera page
+            # appears and keeps it open, so locking for the length of the
+            # request refused every other page and panel for as long as one
+            # of them merely had a camera on screen.
+            if claim is not None and not claim():
+                LOG.info("another talk is in progress; not interrupting it")
+                break
             cam.start_talk(ability["sample_rate"], length_per_encoder)
             talking = True
             started = time.monotonic()
@@ -362,15 +371,27 @@ class Handler(BaseHTTPRequestHandler):
             return {}
 
     def _talk(self, produce) -> None:
-        """Hold the camera for one talk, whoever is producing the audio."""
-        if not TALK_LOCK.acquire(blocking=False):
-            self.send_json(HTTPStatus.CONFLICT,
-                           {"error": "This add-on is already talking"})
-            return
+        """Run one talk request, whoever is producing the audio.
+
+        The lock is not taken here. A panel opens this request when a camera
+        page appears and holds it open, silent, until somebody presses the
+        button — so locking for the length of the request refused every
+        other page and panel while one of them merely had a camera on
+        screen, and a panel refused falls back to the slower path. It is
+        taken at the first word instead, which is when two talkers would
+        actually collide.
+        """
+        held = False
+
+        def claim() -> bool:
+            nonlocal held
+            held = TALK_LOCK.acquire(blocking=False)
+            return held
+
         try:
             cam, ability = CAMERA.borrow()
             try:
-                result = produce(cam, ability)
+                result = produce(cam, ability, claim)
             finally:
                 # The talk channel is released, the connection is not: the
                 # next press should find it already open.
@@ -391,7 +412,8 @@ class Handler(BaseHTTPRequestHandler):
             CAMERA.drop()
             self.send_json(HTTPStatus.BAD_GATEWAY, {"error": str(err)})
         finally:
-            TALK_LOCK.release()
+            if held:
+                TALK_LOCK.release()
 
     # -- routes ----------------------------------------------------------
 
@@ -452,14 +474,16 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/talk":
             reader = self._body_reader()
 
-            def produce(cam, ability):
-                return stream_pcm(cam, reader.read_exactly, ability)
+            def produce(cam, ability, claim):
+                return stream_pcm(cam, reader.read_exactly, ability, claim)
             self._talk(produce)
             return
 
         if self.path == "/api/test-tone":
             seconds = 3.0
-            def produce(cam, ability):
+            def produce(cam, ability, claim):
+                if not claim():
+                    raise RuntimeError("Someone else is talking to the door")
                 cam.start_talk(ability["sample_rate"], ability["length_per_encoder"])
                 encoder = adpcm.Encoder()
                 n_code = adpcm.code_bytes(ability["length_per_encoder"])
