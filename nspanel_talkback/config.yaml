@@ -1,6 +1,6 @@
 name: "NSPanel Companion Talkback"
 description: "Low-latency two-way audio to a Reolink doorbell over Baichuan"
-version: "0.4.0"
+version: "0.5.0"
 slug: "nspanel_companion_talkback"
 init: false
 arch:

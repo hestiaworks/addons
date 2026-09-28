@@ -244,16 +244,21 @@ class LeadingSilence(unittest.TestCase):
         class FakeCamera:
             def __init__(self):
                 self.started = False
+                self.starts = 0
                 self.sent = 0
                 self.start_order = None
             def start_talk(self, *_a, **_k):
                 self.started = True
-                self.start_order = self.sent
+                self.starts += 1
+                if self.start_order is None:
+                    self.start_order = self.sent
+            def stop_talk(self):
+                self.started = False
             def send_audio(self, _record):
                 self.sent += 1
 
         cam = FakeCamera()
-        result = server.stream_pcm(cam, read, ability, claim=lambda: True)
+        result = server.stream_pcm(cam, read, ability, claim=lambda: True, release=lambda: None)
         return cam, result
 
     def _silence(self, per=1025):
@@ -277,7 +282,7 @@ class LeadingSilence(unittest.TestCase):
         cam, result = self._stream([self._silence()] * 30 + [self._speech()] * 5)
         self.assertEqual(5, cam.sent)
         self.assertEqual(30, result["dropped_silent_blocks"])
-        self.assertTrue(cam.started)
+        self.assertEqual(1, cam.starts, "the talk should have been started once")
 
     def test_the_channel_is_claimed_exactly_when_speech_starts(self):
         cam, _ = self._stream([self._silence()] * 30 + [self._speech()] * 5)
@@ -395,14 +400,18 @@ class TalkingIsWhatCollides(unittest.TestCase):
         class FakeCamera:
             def __init__(self):
                 self.started = False
+                self.starts = 0
                 self.sent = 0
             def start_talk(self, *_a, **_k):
                 self.started = True
+                self.starts += 1
+            def stop_talk(self):
+                self.started = False
             def send_audio(self, _r):
                 self.sent += 1
 
         cam = FakeCamera()
-        result = server.stream_pcm(cam, read, ability, claim=claim)
+        result = server.stream_pcm(cam, read, ability, claim=claim, release=lambda: None)
         return cam, result
 
     def silence(self):
@@ -423,13 +432,13 @@ class TalkingIsWhatCollides(unittest.TestCase):
             claim=lambda: (claims.append(1), True)[1],
         )
         self.assertEqual(1, len(claims))
-        self.assertTrue(cam.started)
+        self.assertEqual(1, cam.starts)
 
     def test_a_refused_claim_stops_rather_than_talking_over_someone(self):
         cam, result = self._stream(
             [self.silence()] * 5 + [self.speech()] * 10, claim=lambda: False,
         )
-        self.assertFalse(cam.started, "started a talk while another was in progress")
+        self.assertEqual(0, cam.starts, "started a talk while another was in progress")
         self.assertEqual(0, cam.sent)
 
 
@@ -471,3 +480,73 @@ class SharedConnectionIsolation(unittest.TestCase):
 
     def test_nothing_to_release_is_not_an_error(self):
         self.assertFalse(self._cleanup(held=True, talking=False).stopped)
+
+
+class ATalkEnds(unittest.TestCase):
+    """Letting go of the button must free the channel.
+
+    A panel keeps its request open long after anyone has finished speaking.
+    A session that had started talking went on forwarding that silence,
+    holding the camera's talk channel and this add-on's lock until the
+    request rotated up to twenty seconds later — so the ring screen pressing
+    its own button in that window could claim neither, and got nothing or
+    got through only when the other session happened to rotate.
+    """
+
+    def _run(self, blocks):
+        import struct
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "nspanel_talkback"))
+        import server
+
+        ability = {"sample_rate": 16000, "length_per_encoder": 1024}
+        per = 1 + 512 * 2
+        body = b"".join(struct.pack(f"<{per}h", *b) for b in blocks)
+        pos = {"i": 0}
+
+        def read(count):
+            chunk = body[pos["i"]:pos["i"] + count]
+            pos["i"] += len(chunk)
+            return chunk
+
+        events = []
+
+        class Camera:
+            talking = False
+            def start_talk(self, *_a, **_k):
+                events.append("start")
+            def stop_talk(self):
+                events.append("stop")
+            def send_audio(self, _r):
+                events.append("audio")
+
+        server.stream_pcm(Camera(), read, ability,
+                          claim=lambda: (events.append("claim"), True)[1],
+                          release=lambda: events.append("release"))
+        return events
+
+    def silence(self, n):
+        return [[0] * 1025] * n
+
+    def speech(self, n):
+        return [[12000 if i % 2 else -12000 for i in range(1025)]] * n
+
+    def test_a_pause_between_words_does_not_end_the_talk(self):
+        # Two blocks is 128 ms — well under the tail.
+        events = self._run(self.speech(2) + self.silence(2) + self.speech(2))
+        self.assertEqual(1, events.count("start"), "a gap between words ended the talk")
+
+    def test_letting_go_ends_the_talk_and_frees_the_lock(self):
+        # A second of silence: the button has been released.
+        events = self._run(self.speech(2) + self.silence(20))
+        self.assertEqual(1, events.count("stop"))
+        self.assertEqual(1, events.count("release"))
+
+    def test_speaking_again_claims_it_again(self):
+        events = self._run(self.speech(2) + self.silence(20) + self.speech(2))
+        self.assertEqual(2, events.count("claim"))
+        self.assertEqual(2, events.count("start"))
+
+    def test_silence_after_a_talk_is_not_forwarded(self):
+        events = self._run(self.speech(1) + self.silence(40))
+        # One block of speech, and the tail that ends it — not forty.
+        self.assertLessEqual(events.count("audio"), 17)

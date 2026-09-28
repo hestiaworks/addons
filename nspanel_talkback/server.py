@@ -53,6 +53,16 @@ MAX_TALK_SECONDS = 300
 # Dropping it costs nothing: silence carries no information, and the panel's
 # is literal zeros rather than a quiet room.
 SILENCE_PEAK = 32
+# Silence this long ends a talk. Longer than any gap between words, so a
+# sentence is not cut in half; short enough that letting go of the button
+# frees the channel before anyone else needs it.
+#
+# Without it a talk never ended: a panel keeps its request open and silent
+# after the button is released, and a session that had started talking went
+# on forwarding that silence — holding the camera's talk channel, and this
+# add-on's lock, until the request rotated up to twenty seconds later. The
+# ring screen pressing its own button in that window could claim neither.
+SILENCE_TAIL_SECONDS = 1.0
 
 STATE: dict = {"id": "", "name": "NSPanel Talkback", "token": ""}
 PAIR_CODE = f"{secrets.randbelow(1000000):06d}"
@@ -211,7 +221,7 @@ def note(record: dict) -> None:
     del RECENT[:-RECENT_MAX]
 
 
-def stream_pcm(cam: Camera, read_chunk, ability: dict, claim=None) -> dict:
+def stream_pcm(cam: Camera, read_chunk, ability: dict, claim=None, release=None) -> dict:
     """Encode 16-bit PCM into ADPCM blocks and push them at the camera.
 
     The reader paces this: a panel sends in real time, so blocking until a
@@ -226,6 +236,8 @@ def stream_pcm(cam: Camera, read_chunk, ability: dict, claim=None) -> dict:
     blocks = 0
     dropped = 0
     talking = False
+    quiet_run = 0
+    rate_hz = ability["sample_rate"]
     opened = time.monotonic()
     started = None
     first_speech_at = None
@@ -241,8 +253,24 @@ def stream_pcm(cam: Camera, read_chunk, ability: dict, claim=None) -> dict:
             break
         samples = struct.unpack(f"<{per_block}h", raw)
 
+        quiet = max(samples) < SILENCE_PEAK and min(samples) > -SILENCE_PEAK
+
+        if talking:
+            # A pause between words is speech; a pause this long is the
+            # button being released, and the channel belongs to whoever
+            # wants it next.
+            quiet_run = quiet_run + 1 if quiet else 0
+            if quiet_run * per_block / rate_hz >= SILENCE_TAIL_SECONDS:
+                cam.stop_talk()
+                if release is not None:
+                    release()
+                talking = False
+                quiet_run = 0
+                encoder.reset()
+                continue
+
         if not talking:
-            if max(samples) < SILENCE_PEAK and min(samples) > -SILENCE_PEAK:
+            if quiet:
                 # Read it, drop it, and read the next. This drains whatever
                 # queued up before anyone spoke, at whatever speed it arrives,
                 # so the camera's buffer is empty when the first word reaches
@@ -275,7 +303,11 @@ def stream_pcm(cam: Camera, read_chunk, ability: dict, claim=None) -> dict:
     if not talking:
         LOG.info("talk request carried no speech: %s silent blocks dropped", dropped)
 
-    rate = ability["sample_rate"]
+    if talking:
+        cam.stop_talk()
+        if release is not None:
+            release()
+    rate = rate_hz
     finished = time.monotonic()
     # The comparison that matters: how long the request had been open when
     # speech arrived, against how much silence was actually delivered before
@@ -425,13 +457,27 @@ class Handler(BaseHTTPRequestHandler):
 
         def claim() -> bool:
             nonlocal held
+            if held:
+                return True
             held = TALK_LOCK.acquire(blocking=False)
             return held
+
+        def give_back() -> None:
+            """Released when the button is let go, not when the request ends.
+
+            A panel keeps its request open long after anyone has finished
+            speaking, so holding the lock for its lifetime made one page's
+            finished sentence block every other page and panel.
+            """
+            nonlocal held
+            if held:
+                held = False
+                TALK_LOCK.release()
 
         try:
             cam, ability = CAMERA.borrow()
             try:
-                result = produce(cam, ability, claim)
+                result = produce(cam, ability, claim, give_back)
             finally:
                 # Only the request that claimed the channel may release it.
                 #
@@ -529,14 +575,14 @@ class Handler(BaseHTTPRequestHandler):
         if self.path == "/api/talk":
             reader = self._body_reader()
 
-            def produce(cam, ability, claim):
-                return stream_pcm(cam, reader.read_exactly, ability, claim)
+            def produce(cam, ability, claim, release):
+                return stream_pcm(cam, reader.read_exactly, ability, claim, release)
             self._talk(produce)
             return
 
         if self.path == "/api/test-tone":
             seconds = 3.0
-            def produce(cam, ability, claim):
+            def produce(cam, ability, claim, _release):
                 if not claim():
                     raise RuntimeError("Someone else is talking to the door")
                 cam.start_talk(ability["sample_rate"], ability["length_per_encoder"])
