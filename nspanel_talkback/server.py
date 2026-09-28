@@ -57,6 +57,13 @@ SILENCE_PEAK = 32
 STATE: dict = {"id": "", "name": "NSPanel Talkback", "token": ""}
 PAIR_CODE = f"{secrets.randbelow(1000000):06d}"
 TALK_LOCK = threading.Lock()
+#: The last few talks, timed. Read through /api/diagnostics.
+#:
+#: Built because four plausible explanations for a delay were each wrong,
+#: and each cost a code change. What a talk actually spends its time on is
+#: cheap to record and impossible to argue with.
+RECENT: list = []
+RECENT_MAX = 12
 
 
 def load_options() -> dict:
@@ -199,6 +206,11 @@ def check_ability(cam: Camera) -> dict:
     return ability
 
 
+def note(record: dict) -> None:
+    RECENT.append(record)
+    del RECENT[:-RECENT_MAX]
+
+
 def stream_pcm(cam: Camera, read_chunk, ability: dict, claim=None) -> dict:
     """Encode 16-bit PCM into ADPCM blocks and push them at the camera.
 
@@ -216,6 +228,8 @@ def stream_pcm(cam: Camera, read_chunk, ability: dict, claim=None) -> dict:
     talking = False
     opened = time.monotonic()
     started = None
+    first_speech_at = None
+    start_talk_seconds = 0.0
     while True:
         if started is None:
             if time.monotonic() - opened > MAX_TALK_SECONDS:
@@ -247,7 +261,9 @@ def stream_pcm(cam: Camera, read_chunk, ability: dict, claim=None) -> dict:
             if claim is not None and not claim():
                 LOG.info("another talk is in progress; not interrupting it")
                 break
+            first_speech_at = time.monotonic()
             cam.start_talk(ability["sample_rate"], length_per_encoder)
+            start_talk_seconds = time.monotonic() - first_speech_at
             talking = True
             started = time.monotonic()
 
@@ -258,6 +274,30 @@ def stream_pcm(cam: Camera, read_chunk, ability: dict, claim=None) -> dict:
 
     if not talking:
         LOG.info("talk request carried no speech: %s silent blocks dropped", dropped)
+
+    rate = ability["sample_rate"]
+    finished = time.monotonic()
+    # The comparison that matters: how long the request had been open when
+    # speech arrived, against how much silence was actually delivered before
+    # it. Equal means the panel streamed in real time and the wait was the
+    # person. Much less silence than wall time means the panel opened late
+    # or stalled; much more means it dumped a backlog.
+    record = {
+        "at": time.strftime("%H:%M:%S"),
+        "silence_blocks": dropped,
+        "silence_seconds": round(dropped * per_block / rate, 2),
+        "wall_before_speech": round((first_speech_at - opened), 2) if first_speech_at else None,
+        "start_talk_seconds": round(start_talk_seconds, 3),
+        "speech_blocks": blocks,
+        "speech_seconds": round(blocks * per_block / rate, 2),
+        "wall_streaming": round(finished - first_speech_at, 2) if first_speech_at else None,
+    }
+    if first_speech_at and blocks:
+        # Positive means the camera was fed slower than real time, which is
+        # latency accumulating somewhere between the microphone and here.
+        record["drift_seconds"] = round(
+            (finished - first_speech_at) - blocks * per_block / rate, 2)
+    note(record)
     return {
         "blocks": blocks,
         "seconds": round(blocks * per_block / ability["sample_rate"], 2),
@@ -447,6 +487,13 @@ class Handler(BaseHTTPRequestHandler):
                 "camera_host": options.get("camera_host", ""),
                 "sample_rate": SAMPLE_RATE,
             })
+            return
+
+        if self.path == "/api/diagnostics":
+            if not self.authorized():
+                self.send_json(HTTPStatus.UNAUTHORIZED, {"error": "Invalid credential"})
+                return
+            self.send_json(HTTPStatus.OK, {"recent_talks": list(RECENT)})
             return
 
         if self.path == "/api/ability":
